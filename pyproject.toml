@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "roll-qr-scale"
+version = "0.2.0rc8"
+description = "Capture a roll QR code and bind it to a scale reading."
+requires-python = ">=3.10"
+dependencies = [
+    "google-genai==2.16.0",
+    "paddleocr==3.7.0",
+    "paddlepaddle==3.3.1",
+    "ultralytics==8.4.114",
+    "pyserial==3.5",
+    "zxing-cpp==3.1.1",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest==8.4.2",
+    "qrcode[pil]==8.2",
+]
+build = [
+    "pyinstaller==6.21.0",
+]
+
+[project.scripts]
+roll-qr-scale = "roll_qr_scale.app:main"
+roll-lookup = "roll_qr_scale.lookup:main"
+roll-test-ui = "roll_qr_scale.test_ui:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

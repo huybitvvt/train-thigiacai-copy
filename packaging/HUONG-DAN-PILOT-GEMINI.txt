@@ -1,0 +1,38 @@
+TRAM CAN QR - PILOT GEMINI MOT CAMERA
+
+1. Giai nen ZIP vao mot thu muc co dinh, vi du C:\TramCanQR-Pilot.
+2. Chay CAI-DAT-LAN-DAU.cmd mot lan. May can Python 3.10+ va Internet.
+3. Notepad mo config.env. Thay replace-with-google-ai-studio-key bang API key pilot moi, sau do luu.
+4. Chay CHAY-TRAM-CAN.cmd. Edge/Chrome se mo http://127.0.0.1:8080.
+5. Cho phep dung camera, chon dung camera, giu can va camera co dinh, bam Space de doc.
+6. Khong dong cua so lenh mau den trong luc test.
+
+GUI CHO KY THUAT KHI CO LOI
+
+- Anh loi: %LOCALAPPDATA%\TramCanQR\dataset\factory_raw
+- Du lieu/log: %LOCALAPPDATA%\TramCanQR
+- Log khoi dong: %LOCALAPPDATA%\TramCanQR\logs\app.log
+- Khong gui API key qua Zalo, email hay file log.
+
+CAP NHAT CODE TRONG DOT PILOT
+
+- Dong cua so CHAY-TRAM-CAN.cmd.
+- Sao luu thu muc %LOCALAPPDATA%\TramCanQR truoc khi cap nhat.
+- Sua/nhan thu muc src moi, sau do chay lai CHAY-TRAM-CAN.cmd. Do source duoc
+  cai editable, code moi co hieu luc ngay; khong can cai lai moi lan sua.
+- Khong xoa .venv-pilot va khong sua config.env neu ban cap nhat khong yeu cau.
+
+TAO FILE EXE/BO CAI SAU KHI SUA
+
+- File EXE da cai khong tu cap nhat khi sua source.
+- Chay BUILD-BAN-MOI.cmd tai thu muc goc source.
+- Neu test dat, lay bo cai moi trong dist\installer.
+- Dong TramCanQR.exe tren may khach, chay bo cai moi de cai de ban cu.
+- config.env, SQLite va cau hinh Supabase tren may khach duoc giu nguyen.
+
+NGHIEM THU TOI THIEU
+
+- Chup 100 luot doc lap tai dung vi tri lap dat.
+- Ghi lai gia tri tren can, gia tri phan mem, thoi gian tra ket qua va cac lan khong nhan.
+- Khong sua tay ket qua de bien mot lan nhan sai thanh dung.
+- Neu sai hoac khong nhan, giu lai anh factory_raw de ky thuat phan tich.

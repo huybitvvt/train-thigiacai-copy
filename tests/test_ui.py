@@ -1,0 +1,898 @@
+import base64
+import uuid
+from pathlib import Path
+
+import cv2
+import numpy as np
+import pytest
+import qrcode
+
+import roll_qr_scale.test_ui as test_ui_module
+from roll_qr_scale.scale import WeightReading
+from roll_qr_scale.gemini_weight import GeminiWeightSuggestion
+from roll_qr_scale.storage import MeasurementStore
+from roll_qr_scale.sync import OutboxSyncWorker
+from roll_qr_scale.test_ui import TEST_UI_HTML, StationUIService, decode_image
+
+
+def make_qr_frame(value: str) -> np.ndarray:
+    qr = qrcode.make(value).convert("RGB").resize((360, 360))
+    frame = np.full((600, 800, 3), 245, dtype=np.uint8)
+    frame[120:480, 220:580] = cv2.cvtColor(np.asarray(qr), cv2.COLOR_RGB2BGR)
+    return frame
+
+
+def image_data_url(frame: np.ndarray) -> str:
+    ok, encoded = cv2.imencode(".jpg", frame)
+    assert ok
+    return "data:image/jpeg;base64," + base64.b64encode(encoded).decode("ascii")
+
+
+def test_decode_image_accepts_browser_data_url() -> None:
+    frame = make_qr_frame("ROLL-WEB-IMAGE")
+    decoded = decode_image(image_data_url(frame))
+    assert decoded.shape == frame.shape
+
+
+def test_ui_capture_decodes_qr_and_saves_stable_manual_weight(tmp_path) -> None:
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(store, None, None, None)
+    result = service.capture("", 125.4, "kg", make_qr_frame("ROLL-WEB-001"))
+    row = store.connection.execute(
+        "SELECT qr_code,weight,unit,weight_source,qr_source,weight_stable,sync_status "
+        "FROM measurements"
+    ).fetchone()
+    store.close()
+
+    assert result["qr_code"] == "ROLL-WEB-001"
+    assert result["sync_status"] == "local"
+    assert tuple(row) == (
+        "ROLL-WEB-001",
+        125.4,
+        "kg",
+        "manual-test-ui",
+        "camera:zxing",
+        1,
+        "local",
+    )
+
+
+def test_ui_save_waits_for_same_event_code_weight_and_image_cloud_ack(tmp_path) -> None:
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    sent: list[tuple[dict[str, object], bytes]] = []
+
+    def fake_send(url, payload, image_path, token):
+        sent.append((dict(payload), Path(image_path).read_bytes()))
+        return {
+            "ok": True,
+            "event_id": payload["event_id"],
+            "id": 501,
+            "image_url": "https://images.example/evidence.jpg",
+            "image_public_id": "roll-captures/event",
+        }
+
+    worker = OutboxSyncWorker(
+        store,
+        "https://example.test/ingest",
+        "device-token",
+        "gateway-test",
+        send=fake_send,
+    )
+    service = StationUIService(store, worker, None, None)
+
+    result = service.capture(
+        "PRODUCT-ENTRY-001",
+        7.08,
+        "kg",
+        make_qr_frame("EVIDENCE-QR"),
+    )
+
+    service.close()
+    store.close()
+    assert result["sync_status"] == "synced"
+    assert result["remote_id"] == 501
+    assert result["remote_image_url"] == "https://images.example/evidence.jpg"
+    assert len(sent) == 1
+    assert sent[0][0]["event_id"] == result["event_id"]
+    assert sent[0][0]["qr_code"] == "PRODUCT-ENTRY-001"
+    assert sent[0][0]["weight"] == pytest.approx(7.08)
+    assert sent[0][1].startswith(b"\xff\xd8")
+
+
+def test_ui_save_reports_cloud_failure_but_keeps_complete_local_event(tmp_path) -> None:
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+
+    def fail_send(*args):
+        raise OSError("network unavailable")
+
+    worker = OutboxSyncWorker(
+        store,
+        "https://offline.test/ingest",
+        "device-token",
+        "gateway-test",
+        send=fail_send,
+    )
+    service = StationUIService(store, worker, None, None)
+
+    result = service.capture(
+        "PRODUCT-OFFLINE-001",
+        13.04,
+        "kg",
+        make_qr_frame("EVIDENCE-OFFLINE"),
+    )
+    saved = store.get(str(result["event_id"]))
+
+    service.close()
+    store.close()
+    assert result["sync_status"] == "failed"
+    assert "network unavailable" in str(result["sync_error"])
+    assert result["pending_count"] == 1
+    assert saved is not None
+    assert saved.qr_code == "PRODUCT-OFFLINE-001"
+    assert saved.weight == pytest.approx(13.04)
+    assert Path(saved.image_path).is_file()
+
+
+def test_ui_analyzes_qr_and_camera_weight_together(tmp_path, monkeypatch) -> None:
+    class FakeOCRSource:
+        def __init__(self, *args, reader=None, **kwargs):
+            self._reader = reader or object()
+
+        def capture(self, frame):
+            return WeightReading(20.15, "kg", True, "OCR: 20.15@0.96", 0.96)
+
+    monkeypatch.setattr(test_ui_module, "CameraOCRWeightSource", FakeOCRSource)
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(store, None, None, None)
+
+    result = service.analyze(
+        make_qr_frame("ROLL-CAMERA-001"),
+        "0.4,0.7,0.6,0.9",
+        "kg",
+    )
+    store.close()
+
+    assert result["qr_code"] == "ROLL-CAMERA-001"
+    assert result["qr_roi"] is not None
+    assert result["weight"] == 20.15
+    assert result["confidence"] == 0.96
+    assert result["quality_pass"] is True
+
+
+def test_ui_uses_camera_calibration_and_temporal_burst(tmp_path, monkeypatch) -> None:
+    observed = {}
+
+    class FakeOCRSource:
+        def __init__(self, roi, *args, reader=None, **kwargs):
+            observed["roi"] = roi
+            self._reader = reader or object()
+
+        def capture_many(self, frames):
+            observed["frames"] = len(frames)
+            return WeightReading(
+                7.84,
+                "kg",
+                True,
+                "TEMPORAL: agreement=7/9",
+                0.88,
+            )
+
+    monkeypatch.setattr(test_ui_module, "CameraOCRWeightSource", FakeOCRSource)
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(
+        store,
+        None,
+        None,
+        None,
+        station_count=1,
+        station_ids=["station-01"],
+        camera_ids=["camera-01"],
+        weight_rois=["0.40,0.70,0.60,0.90"],
+    )
+    frame = make_qr_frame("ROLL-BURST-001")
+
+    result = service.analyze(
+        frame,
+        "auto",
+        "kg",
+        event_id="event-burst-001",
+        station_id="station-01",
+        camera_id="camera-01",
+        weight_frames=[frame.copy(), frame.copy()],
+    )
+    service.close()
+    store.close()
+
+    assert observed["frames"] == 3
+    assert observed["roi"].x1 == pytest.approx(0.40)
+    assert result["roi_method"] == "camera-calibrated"
+    assert result["burst_frames"] == 3
+    assert result["weight"] == pytest.approx(7.84)
+
+
+@pytest.mark.parametrize(
+    ("gemini_value", "expected_weight", "human_review"),
+    ((7.84, 7.84, False), (1.84, None, True)),
+)
+def test_hybrid_accepts_only_independent_local_cloud_agreement(
+    tmp_path,
+    monkeypatch,
+    gemini_value,
+    expected_weight,
+    human_review,
+) -> None:
+    class FakeOCRSource:
+        def __init__(self, *args, reader=None, **kwargs):
+            self._reader = reader or object()
+
+        def capture_many(self, frames):
+            return WeightReading(None, "kg", False, "LOCAL: strict consensus rejected")
+
+        def candidate_reading(self):
+            return WeightReading(
+                7.84,
+                "kg",
+                False,
+                "LOCAL CANDIDATE: 7.84kg; votes=2/3",
+                0.91,
+            )
+
+        def crop(self, frame):
+            return frame[10:30, 10:70]
+
+    class FakeGeminiReader:
+        def __init__(self):
+            self.calls = 0
+
+        def read(self, frames, *, unit):
+            self.calls += 1
+            assert len(frames) == 3
+            return GeminiWeightSuggestion(
+                gemini_value,
+                unit,
+                True,
+                True,
+                f"GEMINI:{gemini_value}",
+                0.2,
+            )
+
+        def status(self):
+            return {"enabled": True}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(test_ui_module, "CameraOCRWeightSource", FakeOCRSource)
+    gemini = FakeGeminiReader()
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(
+        store,
+        None,
+        None,
+        None,
+        gemini_reader=gemini,
+        weight_engine="hybrid",
+    )
+    frame = make_qr_frame("ROLL-HYBRID-001")
+
+    result = service.analyze(
+        frame,
+        "0,0,1,1",
+        "kg",
+        weight_frames=[frame.copy(), frame.copy()],
+    )
+    service.close()
+    store.close()
+
+    assert gemini.calls == 1
+    assert result["weight"] == expected_weight
+    assert result["requires_human_review"] is human_review
+    assert result["recognition_source"] == (
+        "paddle-local+gemini" if expected_weight is not None else "none"
+    )
+
+
+def test_hybrid_skips_gemini_when_local_consensus_passes(tmp_path, monkeypatch) -> None:
+    class FakeOCRSource:
+        def __init__(self, *args, reader=None, **kwargs):
+            self._reader = reader or object()
+
+        def capture_many(self, frames):
+            return WeightReading(7.84, "kg", True, "LOCAL: accepted", 0.96)
+
+        def candidate_reading(self):
+            return WeightReading(7.84, "kg", True, "LOCAL: accepted", 0.96)
+
+    class ForbiddenGeminiReader:
+        def read(self, frames, *, unit):
+            raise AssertionError("Gemini must not run after local acceptance")
+
+        def status(self):
+            return {"enabled": True}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(test_ui_module, "CameraOCRWeightSource", FakeOCRSource)
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(
+        store,
+        None,
+        None,
+        None,
+        gemini_reader=ForbiddenGeminiReader(),
+        weight_engine="hybrid",
+    )
+    frame = make_qr_frame("ROLL-LOCAL-001")
+
+    result = service.analyze(
+        frame,
+        "0,0,1,1",
+        "kg",
+        weight_frames=[frame.copy(), frame.copy()],
+    )
+    service.close()
+    store.close()
+
+    assert result["weight"] == pytest.approx(7.84)
+    assert result["gemini_used"] is False
+    assert result["recognition_source"] == "paddle-local"
+
+
+@pytest.mark.parametrize(("gemini_value", "expected_weight"), ((7.84, 7.84), (None, None)))
+def test_gemini_primary_reads_same_camera_burst_without_paddle(
+    tmp_path,
+    monkeypatch,
+    gemini_value,
+    expected_weight,
+) -> None:
+    class FakeGeminiReader:
+        def __init__(self):
+            self.calls = 0
+
+        def read(self, frames, *, unit):
+            self.calls += 1
+            assert len(frames) == 3
+            assert all(frame.shape[:2] == (600, 800) for frame in frames)
+            return GeminiWeightSuggestion(
+                gemini_value,
+                unit,
+                gemini_value is not None,
+                gemini_value is not None,
+                "GEMINI:test",
+                0.25,
+            )
+
+        def status(self):
+            return {"enabled": True}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        test_ui_module.PaddleOCRTextReader,
+        "create",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("Paddle must not load")),
+    )
+    gemini = FakeGeminiReader()
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(
+        store,
+        None,
+        None,
+        None,
+        gemini_reader=gemini,
+        weight_engine="gemini",
+    )
+    service.start_ocr_preload()
+    frame = make_qr_frame("ROLL-GEMINI-PRIMARY")
+
+    result = service.analyze(
+        frame,
+        "0,0,0.1,0.1",
+        "kg",
+        weight_frames=[frame.copy(), frame.copy()],
+    )
+    service.close()
+    store.close()
+
+    assert gemini.calls == 1
+    assert result["weight"] == expected_weight
+    assert result["recognition_source"] == (
+        "gemini-primary" if expected_weight is not None else "none"
+    )
+    assert result["gemini_used"] is True
+    assert result["confidence"] is None
+    assert result["gemini_input_tokens"] == 0
+    assert result["gemini_output_tokens"] == 0
+    assert result["gemini_thinking_tokens"] == 0
+    assert result["gemini_total_tokens"] == 0
+    assert result["roi"] is None
+    assert result["roi_method"] == "gemini-full-frame"
+    assert service.status()["weight_engine"] == "gemini"
+    assert service.status()["ocr_ready"] is False
+
+
+def test_gemini_primary_uses_one_full_image_for_file_and_camera(
+    tmp_path,
+) -> None:
+    class FakeGeminiReader:
+        def __init__(self):
+            self.calls = 0
+
+        def read(self, frames, *, unit):
+            self.calls += 1
+            assert len(frames) == 1
+            assert frames[0].shape[:2] == (600, 800)
+            return GeminiWeightSuggestion(7.84, unit, True, True, "GEMINI:test", 0.2)
+
+        def status(self):
+            return {"enabled": True}
+
+        def close(self):
+            pass
+
+    gemini = FakeGeminiReader()
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(
+        store,
+        None,
+        None,
+        None,
+        gemini_reader=gemini,
+        weight_engine="gemini",
+    )
+    frame = make_qr_frame("ROLL-GEMINI-STILL")
+
+    result = service.analyze(frame, "0,0,0.1,0.1", "kg")
+    assert result["weight"] == pytest.approx(7.84)
+    assert result["burst_frames"] == 1
+    assert "single full-image accepted" in result["weight_raw"]
+
+    camera_result = service.analyze(
+        frame,
+        "0,0,0.1,0.1",
+        "kg",
+        require_temporal=True,
+    )
+    assert camera_result["weight"] == pytest.approx(7.84)
+    assert camera_result["burst_frames"] == 1
+    assert "single full-image accepted" in camera_result["weight_raw"]
+
+    service.close()
+    store.close()
+    assert gemini.calls == 2
+
+
+def test_gemini_allows_successful_low_resolution_full_image(tmp_path) -> None:
+    class FakeGeminiReader:
+        def read(self, frames, *, unit):
+            assert len(frames) == 1
+            assert frames[0].shape[:2] == (240, 320)
+            return GeminiWeightSuggestion(
+                7.02,
+                unit,
+                True,
+                True,
+                "GEMINI_FULL:test",
+                0.2,
+                qr_code="ROLL-LOW-RES",
+                qr_readable=True,
+            )
+
+        def status(self):
+            return {"enabled": True}
+
+        def close(self):
+            pass
+
+    frame = np.full((240, 320, 3), 150, dtype=np.uint8)
+    cv2.putText(frame, "7.02", (20, 150), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 0), 5)
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(
+        store,
+        None,
+        None,
+        None,
+        gemini_reader=FakeGeminiReader(),
+        weight_engine="gemini",
+    )
+
+    result = service.analyze(frame, "auto", "kg")
+    saved = service.capture(
+        "ROLL-LOW-RES",
+        7.02,
+        "kg",
+        frame,
+        vision_confirmed=True,
+        weight_raw="GEMINI_FULL:test",
+    )
+
+    service.close()
+    store.close()
+    assert result["qr_code"] == "ROLL-LOW-RES"
+    assert result["weight"] == pytest.approx(7.02)
+    assert result["quality_pass"] is True
+    assert result["quality"]["issues"] == []
+    assert result["quality"]["low_resolution_ignored"] is True
+    assert saved["qr_code"] == "ROLL-LOW-RES"
+
+
+def test_gemini_full_frame_supplies_qr_when_local_decoder_misses(tmp_path) -> None:
+    class FakeGeminiReader:
+        def read(self, frames, *, unit):
+            return GeminiWeightSuggestion(
+                9.34,
+                unit,
+                True,
+                True,
+                "GEMINI_FULL:test",
+                0.2,
+                qr_code="ROLL-CLOUD-QR",
+                qr_readable=True,
+            )
+
+        def status(self):
+            return {"enabled": True}
+
+        def close(self):
+            pass
+
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(
+        store,
+        None,
+        None,
+        None,
+        gemini_reader=FakeGeminiReader(),
+        weight_engine="gemini",
+    )
+
+    result = service.analyze(np.full((600, 800, 3), 180, dtype=np.uint8), "auto", "kg")
+
+    service.close()
+    store.close()
+    assert result["qr_found"] is True
+    assert result["qr_code"] == "ROLL-CLOUD-QR"
+    assert result["qr_decoder"] == "gemini-full-frame"
+    assert result["weight"] == pytest.approx(9.34)
+
+
+def test_gemini_full_frame_keeps_local_qr_on_cloud_conflict(tmp_path) -> None:
+    class FakeGeminiReader:
+        def read(self, frames, *, unit):
+            return GeminiWeightSuggestion(
+                9.34,
+                unit,
+                True,
+                True,
+                "GEMINI_FULL:test",
+                0.2,
+                qr_code="ROLL-DIFFERENT",
+                qr_readable=True,
+            )
+
+        def status(self):
+            return {"enabled": True}
+
+        def close(self):
+            pass
+
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(
+        store,
+        None,
+        None,
+        None,
+        gemini_reader=FakeGeminiReader(),
+        weight_engine="gemini",
+    )
+
+    result = service.analyze(make_qr_frame("ROLL-LOCAL"), "auto", "kg")
+
+    service.close()
+    store.close()
+    assert result["qr_found"] is True
+    assert result["qr_code"] == "ROLL-LOCAL"
+    assert result["qr_decoder"].endswith("+gemini-conflict-local-kept")
+    assert "kept checksum-validated local QR" in result["weight_raw"]
+
+
+def test_gemini_accurate_profile_uses_accurate_reader(tmp_path) -> None:
+    class FakeGeminiReader:
+        def __init__(self, model, value):
+            self.model = model
+            self.value = value
+            self.calls = 0
+
+        def read(self, frames, *, unit):
+            self.calls += 1
+            return GeminiWeightSuggestion(
+                self.value,
+                unit,
+                True,
+                True,
+                f"GEMINI_FULL:{self.model}",
+                0.2,
+                qr_code="ROLL-PROFILE",
+                qr_readable=True,
+            )
+
+        def status(self):
+            return {"enabled": True, "model": self.model}
+
+        def close(self):
+            pass
+
+    fast = FakeGeminiReader("gemini-3.5-flash-lite", 7.02)
+    accurate = FakeGeminiReader("gemini-3.1-pro-preview", 13.04)
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(
+        store,
+        None,
+        None,
+        None,
+        gemini_reader=fast,
+        gemini_accurate_reader=accurate,
+        weight_engine="gemini",
+    )
+
+    result = service.analyze(
+        make_qr_frame("ROLL-PROFILE"),
+        "auto",
+        "kg",
+        recognition_profile="accurate",
+    )
+
+    status = service.status()
+    service.close()
+    store.close()
+    assert result["weight"] == pytest.approx(13.04)
+    assert result["recognition_profile"] == "accurate"
+    assert fast.calls == 0
+    assert accurate.calls == 1
+    assert status["recognition_profiles"]["fast"]["model"] == "gemini-3.5-flash-lite"
+    assert status["recognition_profiles"]["accurate"]["model"] == "gemini-3.1-pro-preview"
+
+
+def test_ui_capture_blocks_same_frame_but_allows_consecutive_new_frames(tmp_path) -> None:
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(store, None, None, None, duplicate_window=5)
+    frame = make_qr_frame("ROLL-WEB-DUPLICATE")
+    service.capture("ROLL-WEB-DUPLICATE", 20, "kg", frame)
+    with pytest.raises(ValueError, match="khung hình mới"):
+        service.capture("ROLL-WEB-DUPLICATE", 20, "kg", frame)
+    next_frame = frame.copy()
+    next_frame[0, 0] = 0
+    result = service.capture("ROLL-WEB-DUPLICATE", 20, "kg", next_frame)
+    assert result["event_id"]
+    assert store.connection.execute("SELECT COUNT(*) FROM measurements").fetchone()[0] == 2
+    store.close()
+
+
+def test_ui_rejects_invalid_weight_and_image(tmp_path) -> None:
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(store, None, None, None)
+    with pytest.raises(ValueError, match="không âm"):
+        service.capture("ROLL-WEB-BAD", -1, "kg", make_qr_frame("ROLL-WEB-BAD"))
+    with pytest.raises(ValueError, match="base64"):
+        decode_image("not-base64")
+    store.close()
+
+
+def test_ui_has_capture_controls_without_lookup_panel() -> None:
+    for control_id in (
+        'id="captureFile"',
+        'id="captureFileBtn"',
+        'id="analyzeBtn"',
+        'id="roiBox"',
+        'id="qrBox"',
+        'id="roiValue"',
+        'id="syncBadge"',
+        'id="geminiBadge"',
+        'id="weightModeBadge"',
+        'id="factoryBtn"',
+    ):
+        assert control_id in TEST_UI_HTML
+    for removed_control in (
+        'id="lookupQr"',
+        'id="lookupFile"',
+        'id="lookupCameraBtn"',
+        '<aside class="card lookup-card">',
+        '2. Quét lại QR để tra cứu',
+    ):
+        assert removed_control not in TEST_UI_HTML
+    assert "MỘT CAMERA · QR + CÂN" in TEST_UI_HTML
+    assert "ĐÃ LƯU LẦN " in TEST_UI_HTML
+    assert "ĐỒNG BỘ SUPABASE: BẬT" in TEST_UI_HTML
+    assert "analyzeCurrent()" in TEST_UI_HTML
+    assert "SẴN SÀNG CHỤP TIẾP" in TEST_UI_HTML
+    assert "prepareNextCapture(data.qr_code)" in TEST_UI_HTML
+
+
+def test_ui_uses_viet_nhat_red_black_roboto_branding() -> None:
+    assert "Việt Nhật IPT — Trạm cân QR" in TEST_UI_HTML
+    assert '<img class="brand-mark" src="/logo.jpg" alt="Việt Nhật IPT">' in TEST_UI_HTML
+    assert "font-family:Roboto" in TEST_UI_HTML
+    assert 'local("Roboto Regular")' in TEST_UI_HTML
+    assert "--primary:#d71920" in TEST_UI_HTML
+    assert "fonts.googleapis.com" not in TEST_UI_HTML
+
+
+def test_ui_uses_full_width_single_column_capture_layout() -> None:
+    assert "main{width:100%;margin:18px 0;padding:0 18px 24px;display:block}" in TEST_UI_HTML
+    assert "grid-template-columns:minmax(0,1fr) clamp(300px,22vw,360px)" not in TEST_UI_HTML
+    assert '<aside class="card lookup-card">' not in TEST_UI_HTML
+    assert "main{width:100%" in TEST_UI_HTML
+
+
+def test_core_first_workflow_does_not_use_detected_qr_as_product_code() -> None:
+    assert "session.qr='';session.weight=data.weight_found" in TEST_UI_HTML
+    assert "session.qr=data.qr_code||''" not in TEST_UI_HTML
+    assert "Gemini đọc cân lõi" in TEST_UI_HTML
+
+
+def test_ui_enables_local_yolo_model_by_default(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    assert test_ui_module.build_parser().parse_args([]).yolo_model is None
+    model = tmp_path / "models" / "qr_demo_synthetic.pt"
+    model.parent.mkdir()
+    model.write_bytes(b"test")
+    args = test_ui_module.build_parser().parse_args([])
+    assert args.yolo_model == "models/qr_demo_synthetic.pt"
+    assert args.yolo_mode == "fallback"
+    assert args.ocr_min_confidence == pytest.approx(0.60)
+    assert args.diagnostic_image is None
+
+
+def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
+    monkeypatch.delenv("ROLL_SCALE_GATEWAY_ID", raising=False)
+    monkeypatch.delenv("ROLL_SCALE_DEVICE_ID", raising=False)
+    monkeypatch.delenv("ROLL_SCALE_WEIGHT_ENGINE", raising=False)
+    monkeypatch.delenv("ROLL_SCALE_GEMINI_API_KEY", raising=False)
+    args = test_ui_module.build_parser().parse_args([])
+    assert args.station_count == 1
+    assert args.gateway_id == "gateway-01"
+    assert args.station_ids is None
+    assert args.camera_ids is None
+    assert args.weight_rois is None
+    assert args.weight_burst_frames == 5
+    assert args.weight_engine == "local"
+    assert args.gemini_fallback is False
+    assert args.gemini_timeout == pytest.approx(10.0)
+    assert args.gemini_model == "gemini-3.5-flash-lite"
+    assert args.gemini_accurate_model == "gemini-3.1-pro-preview"
+    assert args.gemini_accurate_timeout == pytest.approx(30.0)
+    assert args.auto_advance is True
+    for marker in (
+        'id="stationGrid"',
+        'id="cameraSelect1"',
+        'id="autoAdvance"',
+        'id="discardBtn"',
+        "class CameraSession extends StationSession",
+        "navigator.mediaDevices.enumerateDevices()",
+        "deviceId:{exact:requested}",
+        "localStorage.getItem",
+        "crypto.randomUUID",
+        "data.event_id!==requestEventId",
+        "event.key==='Enter'",
+        "['1','2','3']",
+        "refreshCameraDevices(requestPermission=false)",
+        "session.stream!==stream||session.streamGeneration!==generation",
+        "ĐỦ DỮ LIỆU · ",
+        "prepareNextCapture('',session)",
+        "'awaiting-code'",
+        "function completionReady(session)",
+        "ĐÃ CÂN LÕI · CHỜ MÃ NHẬP SP",
+        "ẢNH TL LÕI",
+        "Nhanh · Flash-Lite · 10s",
+        "Chính xác · Pro · 30s",
+        "savedStationIndex=stations.indexOf(session)",
+        "if(session===current())analyzeCurrent()",
+        "captureEditor=event.target===captureQr||event.target===weight",
+        "const failedStream=session.stream",
+        "this.hydratedPending=Boolean(config.event_id)",
+        "function pollPendingSessions()",
+        "stations.length===1)loadDemo()",
+        "session.deviceId&&!session.hasUnsavedReview()",
+        "weight_frames:weightFrames",
+        "captureWeightBurst(session)",
+        "event.key==='Backspace'&&!typing",
+        "discardCurrent(false)",
+    ):
+        assert marker in TEST_UI_HTML
+
+
+def test_parser_auto_selects_gemini_only_when_key_exists_and_engine_is_omitted(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("ROLL_SCALE_WEIGHT_ENGINE", raising=False)
+    monkeypatch.setenv("ROLL_SCALE_GEMINI_API_KEY", "configured-test-key")
+    assert test_ui_module.build_parser().parse_args([]).weight_engine == "gemini"
+
+    monkeypatch.setenv("ROLL_SCALE_WEIGHT_ENGINE", "local")
+    assert test_ui_module.build_parser().parse_args([]).weight_engine == "local"
+
+
+def test_ui_does_not_offer_fake_gemini_profile_when_backend_is_local() -> None:
+    assert 'id="recognitionProfileOption"' in TEST_UI_HTML
+    assert "$('recognitionProfileOption').hidden=!primary" in TEST_UI_HTML
+    assert "recognitionProfile.disabled=!geminiPrimary" in TEST_UI_HTML
+    assert "BACKEND ĐANG DÙNG OCR LOCAL" in TEST_UI_HTML
+
+
+def test_frozen_ui_does_not_auto_load_workspace_yolo_model(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    model = tmp_path / "models" / "qr_demo_synthetic.pt"
+    model.parent.mkdir()
+    model.write_bytes(b"test")
+    monkeypatch.setattr(test_ui_module.sys, "frozen", True, raising=False)
+
+    assert test_ui_module.build_parser().parse_args([]).yolo_model is None
+
+
+def test_bound_capture_is_idempotent_and_keeps_analysis_id(tmp_path, monkeypatch) -> None:
+    class FakeOCRSource:
+        def __init__(self, *args, reader=None, **kwargs):
+            self._reader = reader or object()
+
+        def capture(self, frame):
+            return WeightReading(20.15, "kg", True, "OCR: 20.15@0.96", 0.96)
+
+    monkeypatch.setattr(test_ui_module, "CameraOCRWeightSource", FakeOCRSource)
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(
+        store,
+        None,
+        None,
+        None,
+        gateway_id="gateway-test",
+        station_count=1,
+        station_ids=["station-01"],
+        camera_ids=["camera-01"],
+    )
+    frame = make_qr_frame("ROLL-BOUND-001")
+    event_id = str(uuid.uuid4())
+    analysis = service.analyze(
+        frame,
+        "0.4,0.7,0.6,0.9",
+        "kg",
+        event_id=event_id,
+        station_id="station-01",
+        camera_id="camera-01",
+    )
+    kwargs = dict(
+        event_id=event_id,
+        analysis_id=str(analysis["analysis_id"]),
+        station_id="station-01",
+        camera_id="camera-01",
+        frame_sha256=str(analysis["frame_sha256"]),
+    )
+    first = service.capture("ROLL-BOUND-001", 20.15, "kg", frame, True, "OCR", **kwargs)
+    retry = service.capture("ROLL-BOUND-001", 20.15, "kg", frame, True, "OCR", **kwargs)
+    row = store.get(event_id)
+    service.close()
+    store.close()
+
+    assert first["duplicate"] is False
+    assert retry["duplicate"] is True
+    assert first["event_id"] == retry["event_id"] == event_id
+    assert first["analysis_id"] == analysis["analysis_id"]
+    assert first["station_id"] == "station-01"
+    assert first["camera_id"] == "camera-01"
+    assert first["frame_sha256"] == analysis["frame_sha256"]
+    assert row is not None and row.captured_at == analysis["captured_at"]
+
+
+def test_service_rejects_duplicate_logical_camera_ids(tmp_path) -> None:
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    with pytest.raises(ValueError, match="camera_id values must be unique"):
+        StationUIService(
+            store,
+            None,
+            None,
+            None,
+            station_count=2,
+            camera_ids=["camera-same", "camera-same"],
+        )
+    store.close()

@@ -1,0 +1,7 @@
+project_id = "njdlkyxdieefeebcyaov"
+
+[functions.ingest-measurement]
+verify_jwt = false
+
+[functions.lookup-roll]
+verify_jwt = false

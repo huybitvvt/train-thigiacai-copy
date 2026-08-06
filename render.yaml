@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: tram-can-qr-pilot
+    runtime: python
+    plan: free
+    region: singapore
+    autoDeploy: true
+    buildCommand: pip install -r requirements-render.txt
+    startCommand: PYTHONPATH=src python -m roll_qr_scale.render_app
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.11
+      - key: ROLL_SCALE_WEIGHT_ENGINE
+        value: gemini
+      - key: ROLL_SCALE_GEMINI_ENABLED
+        value: "true"
+      - key: ROLL_SCALE_STATION_COUNT
+        value: "1"
+      - key: ROLL_SCALE_STATION_IDS
+        value: station-01
+      - key: ROLL_SCALE_CAMERA_IDS
+        value: camera-01
+      - key: ROLL_SCALE_GATEWAY_ID
+        value: render-pilot-01
+      - key: ROLL_SCALE_GEMINI_API_KEY
+        sync: false
+      - key: ROLL_SCALE_API_URL
+        sync: false
+      - key: ROLL_SCALE_DEVICE_TOKEN
+        sync: false
+      - key: ROLL_SCALE_LOOKUP_URL
+        sync: false
+      - key: ROLL_SCALE_LOOKUP_TOKEN
+        sync: false
+      - key: ROLL_SCALE_WEB_USERNAME
+        value: pilot
+      - key: ROLL_SCALE_WEB_PASSWORD
+        sync: false
