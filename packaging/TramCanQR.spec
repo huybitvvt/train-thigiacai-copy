@@ -7,6 +7,7 @@ project_root = Path(SPECPATH).parent
 datas = [
     (str(project_root / "data" / "warehouse_scale_demo.png"), "assets/data"),
     (str(project_root / "data" / "viet_nhat_ipt_logo.jpg"), "assets/data"),
+    (str(project_root / "frontend" / "index.html"), "assets/frontend"),
 ]
 binaries = []
 hiddenimports = ["zxingcpp", "google.genai", "google.genai.types"]
@@ -17,8 +18,8 @@ for package in ("google.genai", "zxingcpp"):
     hiddenimports += package_hiddenimports
 
 a = Analysis(
-    [str(project_root / "src" / "roll_qr_scale" / "windows_app.py")],
-    pathex=[str(project_root / "src")],
+    [str(project_root / "backend" / "src" / "roll_qr_scale" / "windows_app.py")],
+    pathex=[str(project_root / "backend" / "src")],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,

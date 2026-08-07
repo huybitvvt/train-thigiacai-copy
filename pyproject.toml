@@ -31,7 +31,7 @@ roll-lookup = "roll_qr_scale.lookup:main"
 roll-test-ui = "roll_qr_scale.test_ui:main"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["backend/src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

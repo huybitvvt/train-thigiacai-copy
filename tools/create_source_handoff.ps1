@@ -28,7 +28,7 @@ function Copy-Tree([string]$relative) {
         }
 }
 
-foreach ($directory in @("src", "tests", "tools", "packaging", "docs", "supabase", "config")) {
+foreach ($directory in @("frontend", "backend", "tests", "tools", "packaging", "docs", "config")) {
     Copy-Tree $directory
 }
 
@@ -37,7 +37,6 @@ foreach ($file in @(
     "pyproject.toml",
     "requirements.txt",
     ".env.example",
-    "supabase_schema.sql",
     "YOLOv8_QR_Can_Colab.ipynb"
 )) {
     Copy-Item -LiteralPath (Join-Path $root $file) -Destination (Join-Path $dest $file) -Force

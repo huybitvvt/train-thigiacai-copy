@@ -2,7 +2,8 @@
 
 File `.exe` đã cài **không tự thay đổi** khi sửa `.py`. Có hai cách chạy:
 
-- Chạy source editable: sửa file trong `src\roll_qr_scale`, đóng cửa sổ đang
+- Chạy source editable: sửa backend trong `backend\src\roll_qr_scale` hoặc giao
+  diện trong `frontend\index.html`, đóng cửa sổ đang
   chạy rồi mở lại `CHAY-TRAM-CAN.cmd`; code mới có hiệu lực ngay.
 - Phát hành cho máy khách: chạy `BUILD-BAN-MOI.cmd`, sau đó gửi installer mới
   trong `dist\installer` và cài đè bản cũ.
@@ -21,7 +22,8 @@ API key/config thật vẫn nằm riêng tại
 
 ## 2. Sửa và chạy thử ngay
 
-1. Sửa file trong `src\roll_qr_scale` bằng VS Code.
+1. Sửa backend trong `backend\src\roll_qr_scale` hoặc giao diện trong
+   `frontend\index.html` bằng VS Code.
 2. Đóng cửa sổ `CHAY-TRAM-CAN.cmd`/`TramCanQR` đang chạy.
 3. Chạy lại `CHAY-TRAM-CAN.cmd`.
 4. Mở `http://127.0.0.1:8080` và nhấn `Ctrl+F5`.

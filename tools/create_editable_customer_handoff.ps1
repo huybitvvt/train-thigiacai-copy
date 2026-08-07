@@ -31,7 +31,7 @@ function Copy-Tree([string]$relative) {
         }
 }
 
-foreach ($directory in @("src", "tests", "tools", "packaging", "docs", "supabase", "config")) {
+foreach ($directory in @("frontend", "backend", "tests", "tools", "packaging", "docs", "config")) {
     Copy-Tree $directory
 }
 
@@ -40,7 +40,6 @@ foreach ($file in @(
     "pyproject.toml",
     "requirements.txt",
     ".env.example",
-    "supabase_schema.sql",
     "YOLOv8_QR_Can_Colab.ipynb"
 )) {
     Copy-Item -LiteralPath (Join-Path $root $file) -Destination (Join-Path $dest $file) -Force
@@ -120,7 +119,7 @@ $hash | Set-Content -LiteralPath $hashFile -Encoding ascii
     ZipBytes = (Get-Item -LiteralPath $zip).Length
     Sha256 = $hash
     FileCount = (Get-ChildItem -LiteralPath $dest -Recurse -File -Force | Measure-Object).Count
-    HasSource = Test-Path -LiteralPath (Join-Path $dest "src\roll_qr_scale\test_ui.py")
+    HasSource = Test-Path -LiteralPath (Join-Path $dest "backend\src\roll_qr_scale\test_ui.py")
     HasTests = Test-Path -LiteralPath (Join-Path $dest "tests\test_ui.py")
     HasRealConfig = [bool]$realConfigs
     HasDatabase = [bool]$databaseFiles

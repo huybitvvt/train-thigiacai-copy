@@ -13,7 +13,7 @@ __pycache__/
 /*.ipynb
 runs/
 dataset/
-supabase/.temp/
+backend/supabase/.temp/
 data/**
 !data/warehouse_scale_demo.png
 !data/viet_nhat_ipt_logo.jpg

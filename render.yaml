@@ -5,8 +5,8 @@ services:
     plan: free
     region: singapore
     autoDeploy: true
-    buildCommand: pip install -r requirements-render.txt
-    startCommand: PYTHONPATH=src python -m roll_qr_scale.render_app
+    buildCommand: pip install -r backend/requirements-render.txt
+    startCommand: PYTHONPATH=backend/src ROLL_SCALE_FRONTEND_DIR=frontend python -m roll_qr_scale.render_app
     healthCheckPath: /api/health
     envVars:
       - key: PYTHON_VERSION

@@ -2,6 +2,13 @@
 
 Một gateway có thể vận hành 1–3 trạm camera logic trong cùng giao diện web. Mỗi trạm giữ preview, ảnh đang kiểm tra và danh tính riêng; tác vụ QR/OCR của các trạm đi qua một hàng đợi FIFO dùng chung để các thư viện nhận dạng không chạy chồng nhau. `Space` đóng băng đúng camera của trạm đang chọn, nhân sự kiểm tra kết quả rồi nhấn `Enter` để commit ảnh + dữ liệu vào SQLite. Luồng ghi local không cần Internet, tài khoản AI hoặc API.
 
+Mã nguồn được tách theo ranh giới triển khai:
+
+- `frontend/`: giao diện chạy trong trình duyệt.
+- `backend/src/`: API Python, nhận diện, SQLite và hàng đợi đồng bộ.
+- `backend/supabase/`: migration và Edge Functions.
+- `tests/`: kiểm thử tích hợp cho cả hai phần.
+
 Cloudinary + Supabase là lớp đồng bộ tùy chọn. Khi không cấu hình `ROLL_SCALE_API_URL`, token và Gemini, ứng dụng không gửi ảnh/dữ liệu ra mạng. Nếu có cấu hình, hệ thống vẫn commit SQLite trước rồi mới đồng bộ nền; mất mạng không làm mất lần cân. Retry chỉ được coi là lặp an toàn khi toàn bộ danh tính và nội dung bất biến của cùng `event_id` khớp chính xác. Gemini mặc định tắt; khi bật chế độ toàn ảnh, mỗi lần nhấn `Space` chụp và gửi đúng một ảnh đầy đủ lên Google để đọc cả QR và số cân.
 
 ## Kiến trúc đã triển khai
@@ -84,12 +91,13 @@ Authenticode; cần đối chiếu SHA-256 trước khi chạy.
 Cần Node.js và một Supabase project. Với hệ thống đang chạy, dừng gateway và sao lưu SQLite + thư mục ảnh local, đồng thời tạo backup database Supabase trước khi nâng cấp. Sau đó chạy từ thư mục dự án theo đúng thứ tự: migration database trước, secret sau, Edge Function cuối.
 
 ```powershell
+Set-Location backend
 npx.cmd supabase@latest login
 npx.cmd supabase@latest link --project-ref YOUR_PROJECT_REF
 npx.cmd supabase@latest db push
 
-$deviceToken = .\.venv\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(32))"
-$lookupToken = .\.venv\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(32))"
+$deviceToken = ..\.venv\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(32))"
+$lookupToken = ..\.venv\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(32))"
 npx.cmd supabase@latest secrets set DEVICE_INGEST_TOKEN="$deviceToken"
 npx.cmd supabase@latest secrets set DEVICE_LOOKUP_TOKEN="$lookupToken"
 $cloudinaryCloudName = "YOUR_CLOUDINARY_CLOUD_NAME"
@@ -100,9 +108,10 @@ npx.cmd supabase@latest secrets set CLOUDINARY_API_KEY="$cloudinaryApiKey"
 npx.cmd supabase@latest secrets set CLOUDINARY_API_SECRET="$cloudinaryApiSecret"
 npx.cmd supabase@latest functions deploy ingest-measurement --no-verify-jwt --use-api
 npx.cmd supabase@latest functions deploy lookup-roll --no-verify-jwt --use-api
+Set-Location ..
 ```
 
-`db push` áp dụng tuần tự toàn bộ [supabase/migrations](supabase/migrations), gồm schema ingest ban đầu, Cloudinary, bảng `can_tu_dong` và migration danh tính/hash `20260802120000_capture_identity_hashes.sql`. Phải deploy lại cả hai Function sau khi migration cuối đã thành công; code ingest mới ghi các cột danh tính nên deploy Function trước schema sẽ làm request lỗi. Nếu không dùng CLI, [supabase_schema.sql](supabase_schema.sql) là bản schema gộp để chạy có kiểm soát trong SQL Editor.
+`db push` áp dụng tuần tự toàn bộ [backend/supabase/migrations](backend/supabase/migrations), gồm schema ingest ban đầu, Cloudinary, bảng `can_tu_dong` và migration danh tính/hash `20260802120000_capture_identity_hashes.sql`. Phải deploy lại cả hai Function sau khi migration cuối đã thành công; code ingest mới ghi các cột danh tính nên deploy Function trước schema sẽ làm request lỗi. Nếu không dùng CLI, [backend/supabase_schema.sql](backend/supabase_schema.sql) là bản schema gộp để chạy có kiểm soát trong SQL Editor.
 
 SQLite local tự thêm cột còn thiếu khi gateway mở database cũ và không xóa ảnh/bản ghi lịch sử. Hàng cũ giữ danh tính rỗng; hash được dựng lại từ hàng/ảnh hiện có khi có thể, còn ảnh legacy đã mất thì hash để rỗng thay vì bịa bằng chứng. `device_id` cloud cũ vẫn được đọc như fallback cho `gateway_id`, còn mọi capture mới phải mang bộ danh tính mới.
 
