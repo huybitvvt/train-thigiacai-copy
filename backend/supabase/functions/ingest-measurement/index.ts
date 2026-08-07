@@ -7,8 +7,10 @@ const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/i;
 const EVENT_SELECT =
   "id,image_path,image_url,image_public_id,core_image_path,core_image_url," +
-  "core_image_public_id,qr_code,weight,unit,captured_at," +
-  "device_id,gateway_id,station_id,camera_id,analysis_id,frame_sha256,payload_hash," +
+  "core_image_public_id,qr_image_path,qr_image_url,qr_image_public_id," +
+  "qr_code,weight,unit,captured_at," +
+  "device_id,gateway_id,station_id,camera_id,analysis_id,frame_sha256," +
+  "qr_frame_sha256,payload_hash," +
   "weight_source,qr_source,metadata";
 
 function json(status: number, body: Record<string, unknown>): Response {
@@ -57,6 +59,7 @@ function sameEvent(
   cameraId: string | null,
   analysisId: string | null,
   frameSha256: string | null,
+  qrFrameSha256: string | null,
   payloadHash: string | null,
 ): boolean {
   const metadata = existing.metadata !== null && typeof existing.metadata === "object"
@@ -76,6 +79,7 @@ function sameEvent(
     storedValueMatches(existing.camera_id, cameraId) &&
     storedValueMatches(existing.analysis_id, analysisId) &&
     storedHashMatches(existing.frame_sha256, frameSha256) &&
+    storedHashMatches(existing.qr_frame_sha256, qrFrameSha256) &&
     storedHashMatches(existing.payload_hash, payloadHash);
 }
 
@@ -115,7 +119,10 @@ async function uploadToCloudinary(
     `${publicId.split("/").at(-1)}.jpg`,
   );
   form.append("public_id", publicId);
-  form.append("overwrite", "false");
+  // An event ID is immutable and content hashes are validated before upload,
+  // so overwrite makes a retry safe if a previous two-image attempt stopped
+  // after only one Cloudinary upload completed.
+  form.append("overwrite", "true");
 
   const response = await fetch(
     `https://api.cloudinary.com/v1_1/${encodeURIComponent(cloudName)}/image/upload`,
@@ -174,6 +181,9 @@ Deno.serve(async (request: Request) => {
   const frameSha256 = typeof body.frame_sha256 === "string"
     ? body.frame_sha256.trim().toLowerCase()
     : null;
+  const qrFrameSha256 = typeof body.qr_frame_sha256 === "string"
+    ? body.qr_frame_sha256.trim().toLowerCase()
+    : null;
   const payloadHash = typeof body.payload_hash === "string"
     ? body.payload_hash.trim().toLowerCase()
     : null;
@@ -182,6 +192,8 @@ Deno.serve(async (request: Request) => {
   const capturedAt = typeof body.captured_at === "string" ? body.captured_at : "";
   const imageBase64 = typeof body.image_base64 === "string" ? body.image_base64 : "";
   const imageRole = typeof body.image_role === "string" ? body.image_role : "";
+  const qrImageBase64 = typeof body.qr_image_base64 === "string" ? body.qr_image_base64 : "";
+  const qrImageRole = typeof body.qr_image_role === "string" ? body.qr_image_role : "";
   const weightSource = typeof body.weight_source === "string"
     ? body.weight_source.slice(0, 100)
     : "unknown";
@@ -230,6 +242,12 @@ Deno.serve(async (request: Request) => {
   ) {
     return json(422, { ok: false, error: "invalid_payload_hash" });
   }
+  if (
+    body.qr_frame_sha256 !== undefined && body.qr_frame_sha256 !== null &&
+    (!qrFrameSha256 || !SHA256_PATTERN.test(qrFrameSha256))
+  ) {
+    return json(422, { ok: false, error: "invalid_qr_frame_sha256" });
+  }
   if (!Number.isFinite(weight) || weight < 0 || !UNITS.has(unit)) {
     return json(422, { ok: false, error: "invalid_weight" });
   }
@@ -239,8 +257,17 @@ Deno.serve(async (request: Request) => {
   if (imageBase64.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4 + 4) {
     return json(413, { ok: false, error: "image_too_large" });
   }
+  if (qrImageBase64.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4 + 4) {
+    return json(413, { ok: false, error: "qr_image_too_large" });
+  }
   if (imageRole && imageRole !== "core_weight") {
     return json(422, { ok: false, error: "invalid_image_role" });
+  }
+  if (qrImageRole && qrImageRole !== "product_qr") {
+    return json(422, { ok: false, error: "invalid_qr_image_role" });
+  }
+  if (Boolean(qrImageBase64) !== Boolean(qrFrameSha256)) {
+    return json(422, { ok: false, error: "qr_image_hash_pair_required" });
   }
 
   let image: Uint8Array;
@@ -257,6 +284,24 @@ Deno.serve(async (request: Request) => {
   }
   if (frameSha256 && await sha256Hex(image) !== frameSha256) {
     return json(422, { ok: false, error: "frame_sha256_mismatch" });
+  }
+
+  let qrImage: Uint8Array | null = null;
+  if (qrImageBase64) {
+    try {
+      qrImage = decodeBase64(qrImageBase64);
+    } catch {
+      return json(422, { ok: false, error: "invalid_qr_image_base64" });
+    }
+    if (
+      qrImage.length < 4 || qrImage.length > MAX_IMAGE_BYTES ||
+      qrImage[0] !== 0xff || qrImage[1] !== 0xd8
+    ) {
+      return json(422, { ok: false, error: "invalid_qr_jpeg" });
+    }
+    if (await sha256Hex(qrImage) !== qrFrameSha256) {
+      return json(422, { ok: false, error: "qr_frame_sha256_mismatch" });
+    }
   }
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
@@ -294,6 +339,7 @@ Deno.serve(async (request: Request) => {
         cameraId,
         analysisId,
         frameSha256,
+        qrFrameSha256,
         payloadHash,
       )
     ) {
@@ -307,6 +353,8 @@ Deno.serve(async (request: Request) => {
       image_public_id: existingRow.image_public_id,
       core_image_url: existingRow.core_image_url ?? existingRow.image_url,
       core_image_public_id: existingRow.core_image_public_id ?? existingRow.image_public_id,
+      qr_image_url: existingRow.qr_image_url,
+      qr_image_public_id: existingRow.qr_image_public_id,
       gateway_id: existingRow.gateway_id ?? existingRow.device_id,
       station_id: existingRow.station_id,
       camera_id: existingRow.camera_id,
@@ -338,9 +386,14 @@ Deno.serve(async (request: Request) => {
   const month = String(captureDate.getUTCMonth() + 1).padStart(2, "0");
   const day = String(captureDate.getUTCDate()).padStart(2, "0");
   const imagePublicId = `roll-captures/${gatewayId}/${year}/${month}/${day}/core-weight/${eventId}`;
+  const qrImagePublicId = `roll-captures/${gatewayId}/${year}/${month}/${day}/product-qr/${eventId}`;
   let uploaded: CloudinaryUpload;
+  let uploadedQr: CloudinaryUpload | null = null;
   try {
     uploaded = await uploadToCloudinary(image, imagePublicId);
+    if (qrImage) {
+      uploadedQr = await uploadToCloudinary(qrImage, qrImagePublicId);
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : "cloudinary_upload_failed";
     return json(500, { ok: false, error: message.split(":", 1)[0] });
@@ -361,12 +414,16 @@ Deno.serve(async (request: Request) => {
       core_image_path: uploaded.publicId,
       core_image_url: uploaded.secureUrl,
       core_image_public_id: uploaded.publicId,
+      qr_image_path: uploadedQr?.publicId ?? null,
+      qr_image_url: uploadedQr?.secureUrl ?? null,
+      qr_image_public_id: uploadedQr?.publicId ?? null,
       device_id: gatewayId,
       gateway_id: gatewayId,
       station_id: stationId,
       camera_id: cameraId,
       analysis_id: analysisId,
       frame_sha256: frameSha256,
+      qr_frame_sha256: qrFrameSha256,
       payload_hash: payloadHash,
       weight_source: weightSource,
       qr_source: qrSource,
@@ -401,6 +458,7 @@ Deno.serve(async (request: Request) => {
             cameraId,
             analysisId,
             frameSha256,
+            qrFrameSha256,
             payloadHash,
           )
         ) {
@@ -414,6 +472,8 @@ Deno.serve(async (request: Request) => {
           image_public_id: racedRow.image_public_id,
           core_image_url: racedRow.core_image_url ?? racedRow.image_url,
           core_image_public_id: racedRow.core_image_public_id ?? racedRow.image_public_id,
+          qr_image_url: racedRow.qr_image_url,
+          qr_image_public_id: racedRow.qr_image_public_id,
           gateway_id: racedRow.gateway_id ?? racedRow.device_id,
           station_id: racedRow.station_id,
           camera_id: racedRow.camera_id,
@@ -435,11 +495,14 @@ Deno.serve(async (request: Request) => {
     image_public_id: uploaded.publicId,
     core_image_url: uploaded.secureUrl,
     core_image_public_id: uploaded.publicId,
+    qr_image_url: uploadedQr?.secureUrl ?? null,
+    qr_image_public_id: uploadedQr?.publicId ?? null,
     gateway_id: gatewayId,
     station_id: stationId,
     camera_id: cameraId,
     analysis_id: analysisId,
     frame_sha256: frameSha256,
+    qr_frame_sha256: qrFrameSha256,
     payload_hash: payloadHash,
     duplicate: false,
   });

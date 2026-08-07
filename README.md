@@ -1,6 +1,6 @@
 # Hệ thống offline ghép QR với số cân
 
-Một gateway có thể vận hành 1–3 trạm camera logic trong cùng giao diện web. Mỗi trạm giữ preview, ảnh đang kiểm tra và danh tính riêng; tác vụ QR/OCR của các trạm đi qua một hàng đợi FIFO dùng chung để các thư viện nhận dạng không chạy chồng nhau. `Space` đóng băng đúng camera của trạm đang chọn, nhân sự kiểm tra kết quả rồi nhấn `Enter` để commit ảnh + dữ liệu vào SQLite. Luồng ghi local không cần Internet, tài khoản AI hoặc API.
+Một gateway có thể vận hành 1–3 trạm camera logic trong cùng giao diện web. Mỗi trạm giữ preview, ảnh đang kiểm tra và danh tính riêng; tác vụ QR/OCR của các trạm đi qua một hàng đợi FIFO dùng chung để các thư viện nhận dạng không chạy chồng nhau. `Space` chụp ảnh cân lõi, Gemini/local đọc số và giữ ảnh; sau đó `Q` chụp ảnh QR thứ hai và tự điền mã SP. `Enter` commit mã SP + số cân lõi + hai ảnh vào cùng một event SQLite/outbox.
 
 Mã nguồn được tách theo ranh giới triển khai:
 
@@ -9,20 +9,19 @@ Mã nguồn được tách theo ranh giới triển khai:
 - `backend/supabase/`: migration và Edge Functions.
 - `tests/`: kiểm thử tích hợp cho cả hai phần.
 
-Cloudinary + Supabase là lớp đồng bộ tùy chọn. Khi không cấu hình `ROLL_SCALE_API_URL`, token và Gemini, ứng dụng không gửi ảnh/dữ liệu ra mạng. Nếu có cấu hình, hệ thống vẫn commit SQLite trước rồi mới đồng bộ nền; mất mạng không làm mất lần cân. Retry chỉ được coi là lặp an toàn khi toàn bộ danh tính và nội dung bất biến của cùng `event_id` khớp chính xác. Gemini mặc định tắt; khi bật chế độ toàn ảnh, mỗi lần nhấn `Space` chụp và gửi đúng một ảnh đầy đủ lên Google để đọc cả QR và số cân.
+Cloudinary + Supabase là lớp đồng bộ tùy chọn. Khi không cấu hình API, ứng dụng không gửi ảnh/dữ liệu lên Supabase. Nếu có cấu hình, hệ thống vẫn commit SQLite trước rồi mới đồng bộ; mất mạng không làm mất lần cân. Retry chỉ được coi là lặp an toàn khi danh tính, mã SP, số cân và hash của cả hai ảnh thuộc cùng `event_id` khớp chính xác. Ở chế độ Gemini primary, mỗi lần nhấn `Space` gửi đúng ảnh cân lõi lên Google để đọc số; ảnh thứ hai được QR decoder đọc và giữ làm bằng chứng mã SP.
 
 ## Kiến trúc đã triển khai
 
 ```text
 Trình duyệt: station-01 -> deviceId camera A --+
-             station-02 -> deviceId camera B --+--> Space tại trạm được chọn
+             station-02 -> deviceId camera B --+--> Space: ảnh cân lõi + số cân
              station-03 -> deviceId camera C --+          |
-                                                           v
-                                        ảnh JPEG khóa theo event_id
-                                                           |
-                                       FIFO QR/OCR (1 worker dùng chung)
-                                                           |
-                                       kiểm tra/sửa -> Enter xác nhận
+                                                           +--> Q: ảnh QR + mã SP
+                                                                    |
+                                                     cùng một event_id
+                                                                    |
+                                                         Enter xác nhận
                                                            |
                          SQLite + ảnh local + outbox (commit trước)
                                                            |
@@ -31,7 +30,7 @@ Trình duyệt: station-01 -> deviceId camera A --+
                          Supabase Edge Function (device token)
                               |                         |
                         PostgreSQL                  Cloudinary
-                 danh tính + cân + URL ảnh       ảnh / event_id
+              mã + cân + hai URL ảnh       core-weight + product-qr
 ```
 
 Đầu đọc QR USB HID/COM và cân RS232/USB vẫn dùng được với chương trình desktop một camera `roll-qr-scale.exe`. Giao diện web nhiều camera hiện dùng camera-OCR và một SQLite/outbox chung trên gateway.
@@ -111,7 +110,7 @@ npx.cmd supabase@latest functions deploy lookup-roll --no-verify-jwt --use-api
 Set-Location ..
 ```
 
-`db push` áp dụng tuần tự toàn bộ [backend/supabase/migrations](backend/supabase/migrations), gồm schema ingest ban đầu, Cloudinary, bảng `can_tu_dong` và migration danh tính/hash `20260802120000_capture_identity_hashes.sql`. Phải deploy lại cả hai Function sau khi migration cuối đã thành công; code ingest mới ghi các cột danh tính nên deploy Function trước schema sẽ làm request lỗi. Nếu không dùng CLI, [backend/supabase_schema.sql](backend/supabase_schema.sql) là bản schema gộp để chạy có kiểm soát trong SQL Editor.
+`db push` áp dụng tuần tự toàn bộ [backend/supabase/migrations](backend/supabase/migrations), gồm schema ingest ban đầu, Cloudinary, bảng `can_tu_dong`, danh tính/hash và migration ảnh QR `20260806173000_qr_evidence_image.sql`. Phải chạy migration trước rồi mới deploy lại hai Function; Edge Function mới chọn/ghi các cột QR nên đảo thứ tự sẽ làm request lỗi. Nếu không dùng CLI, [backend/supabase_schema.sql](backend/supabase_schema.sql) là bản schema gộp để chạy có kiểm soát trong SQL Editor.
 
 SQLite local tự thêm cột còn thiếu khi gateway mở database cũ và không xóa ảnh/bản ghi lịch sử. Hàng cũ giữ danh tính rỗng; hash được dựng lại từ hàng/ảnh hiện có khi có thể, còn ảnh legacy đã mất thì hash để rỗng thay vì bịa bằng chứng. `device_id` cloud cũ vẫn được đọc như fallback cho `gateway_id`, còn mọi capture mới phải mang bộ danh tính mới.
 
@@ -119,7 +118,7 @@ Schema tạo:
 
 - `devices`: các gateway được phép ghi/được cập nhật thời điểm nhìn thấy.
 - `rolls`: QR cuộn hàng và thời điểm nhìn thấy.
-- `can_tu_dong`: lịch sử cân tự động append-only, unique theo `event_id`; ảnh cân lõi được lưu ở Cloudinary và tham chiếu riêng bằng `core_image_url`/`core_image_public_id`. Các cột `image_*` vẫn được ghi cùng URL để tương thích bản cũ; ảnh sản phẩm của hệ thống nghiệp vụ không bị ghi đè.
+- `can_tu_dong`: lịch sử cân tự động append-only, unique theo `event_id`; ảnh cân lõi nằm trong `core_image_*`, ảnh QR thứ hai nằm trong `qr_image_*`. Các cột `image_*` vẫn trỏ ảnh cân lõi để tương thích bản cũ.
 - `measurements`: bảng cũ được giữ để tương thích; migration sao chép lịch sử sang `can_tu_dong` trước khi Edge Function chuyển bảng.
 - Bucket private `roll-captures` được giữ để tra cứu tương thích ảnh cũ; lần cân mới dùng Cloudinary.
 - RLS bật; không cấp quyền trực tiếp cho `anon` hoặc `authenticated`.
@@ -186,8 +185,8 @@ Mở `http://127.0.0.1:8080` rồi vận hành như sau:
 1. Cho phép quyền camera, bấm `Làm mới camera`, sau đó chọn đúng camera vật lý trong dropdown của từng trạm. Không dựa vào thứ tự camera `0/1/2` của hệ điều hành.
 2. Ánh xạ browser `deviceId` được lưu trong `localStorage` theo `gateway_id`. Một camera vật lý không thể gán cho hai trạm. Nếu đổi browser/profile/cổng USB làm `deviceId` đổi, chọn lại camera.
 3. Bấm `Mở camera đã gán`. Khi camera rớt kết nối, card chuyển sang `MẤT KẾT NỐI`; giao diện chỉ thử lại đúng `deviceId` đã gán và từ chối stream nếu browser trả nhầm camera. Sự kiện cắm/rút USB cũng kích hoạt làm mới và reconnect.
-4. Chọn trạm bằng card hoặc phím `1`, `2`, `3`. `Space` chỉ chụp trạm đang chọn; các preview khác tiếp tục chạy. Trình duyệt lấy mặc định 5 frame mới liên tiếp: frame đầu được khóa làm ảnh bằng chứng/QR; PaddleOCR chọn đầu–giữa–cuối và suy luận cả ba trong một batch. QR/OCR sau đó vào hàng đợi FIFO một worker.
-5. Kiểm tra/sửa QR và số cân. `Enter` chỉ lưu trạm đang chọn khi lần phân tích đã sẵn sàng. Ảnh chưa lưu của mỗi trạm được giữ riêng và không bị lần chụp mới ghi đè; dùng `Bỏ lần đang xem` nếu thật sự muốn hủy.
+4. Chọn trạm bằng card hoặc phím `1`, `2`, `3`. `Space` chỉ chụp cân lõi của trạm đang chọn; số cân và ảnh đầu được giữ nguyên. Khi trạng thái chuyển sang `CHỜ ẢNH QR`, đưa tem vào camera rồi nhấn `Q` hoặc nút `Chụp ảnh QR` để chụp ảnh thứ hai và tự điền mã SP.
+5. Kiểm tra số cân, hai preview bằng chứng và mã SP tự đọc. `Enter` chỉ lưu khi đủ số cân + ảnh cân lõi + ảnh QR + mã SP trong cùng event. Dùng `Bỏ lần đang xem` nếu thật sự muốn hủy cả phiên.
 6. Sau khi SQLite commit thành công, tùy chọn auto-advance chọn trạm kế tiếp theo vòng tròn. Checkbox trên giao diện có thể đổi hành vi trong phiên hiện tại.
 
 Nút `Dùng ảnh demo kho` nạp QR `ROLL-WAREHOUSE-002015` và cân `20.15 kg` vào trạm đang chọn. Chọn tệp ảnh cũng tự phân tích tại trạm đang chọn. Khi đã cấu hình cloud, outbox gửi nền sau commit local; lỗi mạng không làm request lưu tại trạm thất bại. YOLO là tùy chọn, còn QR rõ được ZXing/OpenCV giải mã trực tiếp.

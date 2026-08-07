@@ -671,9 +671,23 @@ class StationUIService:
         station_id: str | None = None,
         camera_id: str | None = None,
         frame_sha256: str | None = None,
+        qr_frame: np.ndarray | None = None,
+        qr_frame_sha256: str | None = None,
     ) -> dict[str, object]:
         qr_code = qr_code.strip()
-        if not qr_code:
+        if qr_frame is not None:
+            decoded = self.decode_qr(qr_frame)
+            if not decoded.get("found"):
+                raise ValueError("Ảnh QR không đọc được; hãy chụp lại rõ hơn")
+            decoded_qr = str(decoded["qr_code"]).strip()
+            if qr_code and qr_code != decoded_qr:
+                raise ValueError("Mã SP không khớp QR trong ảnh thứ hai")
+            qr_code = decoded_qr
+            qr_source = f"camera-second:{decoded['decoder']}"
+            computed_qr_frame_sha = jpeg_sha256(encode_staged_jpeg(qr_frame))
+            if qr_frame_sha256 and qr_frame_sha256.lower() != computed_qr_frame_sha:
+                raise AnalysisBindingMismatch("qr_frame_sha256 không khớp ảnh QR gửi để lưu")
+        elif not qr_code:
             decoded = self.decode_qr(frame)
             if not decoded.get("found"):
                 raise ValueError("Chưa có QR; hãy quét mã hoặc đưa QR vào camera")
@@ -762,6 +776,7 @@ class StationUIService:
                 station_id=station_id or "",
                 camera_id=camera_id or "",
                 analysis_id=analysis_id or "",
+                qr_frame=qr_frame,
             )
             if not bound_capture:
                 self._recent[capture_key] = time.monotonic()
@@ -794,6 +809,11 @@ class StationUIService:
             "remote_id": current.remote_id,
             "remote_image_url": current.remote_image_url,
             "remote_image_public_id": getattr(current, "remote_image_public_id", None),
+            "qr_frame_sha256": getattr(current, "qr_frame_sha256", ""),
+            "remote_qr_image_url": getattr(current, "remote_qr_image_url", None),
+            "remote_qr_image_public_id": getattr(
+                current, "remote_qr_image_public_id", None
+            ),
             "sync_error": current.sync_error,
             "pending_count": self.store.pending_count(),
         }
@@ -1272,6 +1292,11 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         weight = float(payload.get("weight", ""))
                     except (TypeError, ValueError) as exc:
                         raise ValueError("Số cân không hợp lệ") from exc
+                    qr_frame = (
+                        decode_image(str(payload["qr_image"]))
+                        if payload.get("qr_image")
+                        else None
+                    )
                     result = service.capture(
                         str(payload.get("qr_code", "")),
                         weight,
@@ -1291,6 +1316,10 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         else None,
                         frame_sha256=str(payload["frame_sha256"])
                         if payload.get("frame_sha256")
+                        else None,
+                        qr_frame=qr_frame,
+                        qr_frame_sha256=str(payload["qr_frame_sha256"])
+                        if payload.get("qr_frame_sha256")
                         else None,
                     )
                     self.send_json(201, result)

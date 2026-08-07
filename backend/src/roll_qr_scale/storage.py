@@ -38,6 +38,10 @@ class Measurement:
     analysis_id: str = ""
     frame_sha256: str = ""
     payload_hash: str = ""
+    qr_image_path: str = ""
+    remote_qr_image_url: str | None = None
+    remote_qr_image_public_id: str | None = None
+    qr_frame_sha256: str = ""
 
     def api_payload(self, device_id: str = "") -> dict[str, object]:
         payload = asdict(self)
@@ -50,6 +54,9 @@ class Measurement:
             "remote_image_url",
             "remote_image_public_id",
             "image_path",
+            "qr_image_path",
+            "remote_qr_image_url",
+            "remote_qr_image_public_id",
         ):
             payload.pop(local_field)
 
@@ -62,6 +69,7 @@ class Measurement:
             "camera_id",
             "analysis_id",
             "frame_sha256",
+            "qr_frame_sha256",
             "payload_hash",
         ):
             if not payload.get(optional_field):
@@ -134,6 +142,9 @@ class MeasurementStore:
                 remote_id INTEGER,
                 remote_image_url TEXT,
                 remote_image_public_id TEXT,
+                qr_image_path TEXT NOT NULL DEFAULT '',
+                remote_qr_image_url TEXT,
+                remote_qr_image_public_id TEXT,
                 weight_raw TEXT NOT NULL DEFAULT '',
                 weight_stable INTEGER NOT NULL DEFAULT 1,
                 gateway_id TEXT NOT NULL DEFAULT '',
@@ -141,6 +152,7 @@ class MeasurementStore:
                 camera_id TEXT NOT NULL DEFAULT '',
                 analysis_id TEXT NOT NULL DEFAULT '',
                 frame_sha256 TEXT NOT NULL DEFAULT '',
+                qr_frame_sha256 TEXT NOT NULL DEFAULT '',
                 payload_hash TEXT NOT NULL DEFAULT ''
             )
             """
@@ -172,6 +184,9 @@ class MeasurementStore:
             "remote_id": "INTEGER",
             "remote_image_url": "TEXT",
             "remote_image_public_id": "TEXT",
+            "qr_image_path": "TEXT NOT NULL DEFAULT ''",
+            "remote_qr_image_url": "TEXT",
+            "remote_qr_image_public_id": "TEXT",
             "weight_raw": "TEXT NOT NULL DEFAULT ''",
             "weight_stable": "INTEGER NOT NULL DEFAULT 1",
             "qr_source": "TEXT NOT NULL DEFAULT 'camera'",
@@ -181,6 +196,7 @@ class MeasurementStore:
             "camera_id": "TEXT NOT NULL DEFAULT ''",
             "analysis_id": "TEXT NOT NULL DEFAULT ''",
             "frame_sha256": "TEXT NOT NULL DEFAULT ''",
+            "qr_frame_sha256": "TEXT NOT NULL DEFAULT ''",
             "payload_hash": "TEXT NOT NULL DEFAULT ''",
         }
         for column, definition in additions.items():
@@ -221,6 +237,7 @@ class MeasurementStore:
                     camera_id=str(row["camera_id"]),
                     analysis_id=str(row["analysis_id"]),
                     frame_sha256=frame_sha256,
+                    qr_frame_sha256=str(row["qr_frame_sha256"]),
                 )
             self.connection.execute(
                 "UPDATE measurements SET frame_sha256 = ?, payload_hash = ? WHERE id = ?",
@@ -243,6 +260,7 @@ class MeasurementStore:
         camera_id: str,
         analysis_id: str,
         frame_sha256: str,
+        qr_frame_sha256: str = "",
     ) -> str:
         immutable_payload = {
             "analysis_id": analysis_id,
@@ -259,6 +277,8 @@ class MeasurementStore:
             "weight_source": weight_source,
             "weight_stable": bool(weight_stable),
         }
+        if qr_frame_sha256:
+            immutable_payload["qr_frame_sha256"] = qr_frame_sha256
         canonical = json.dumps(
             immutable_payload,
             ensure_ascii=False,
@@ -286,6 +306,7 @@ class MeasurementStore:
         station_id: str = "",
         camera_id: str = "",
         analysis_id: str = "",
+        qr_frame: np.ndarray | None = None,
     ) -> Measurement:
         return self.save_idempotent(
             qr_code,
@@ -303,6 +324,7 @@ class MeasurementStore:
             station_id=station_id,
             camera_id=camera_id,
             analysis_id=analysis_id,
+            qr_frame=qr_frame,
         ).measurement
 
     def save_idempotent(
@@ -323,6 +345,7 @@ class MeasurementStore:
         station_id: str = "",
         camera_id: str = "",
         analysis_id: str = "",
+        qr_frame: np.ndarray | None = None,
     ) -> SaveResult:
         event_id = event_id or str(uuid.uuid4())
         if captured_at is None:
@@ -341,6 +364,14 @@ class MeasurementStore:
             raise OSError("Cannot encode capture image as JPEG")
         jpeg_bytes = encoded_frame.tobytes()
         frame_sha256 = hashlib.sha256(jpeg_bytes).hexdigest()
+        qr_jpeg_bytes = b""
+        qr_frame_sha256 = ""
+        if qr_frame is not None:
+            qr_encoded_ok, encoded_qr_frame = cv2.imencode(".jpg", qr_frame)
+            if not qr_encoded_ok:
+                raise OSError("Cannot encode QR evidence image as JPEG")
+            qr_jpeg_bytes = encoded_qr_frame.tobytes()
+            qr_frame_sha256 = hashlib.sha256(qr_jpeg_bytes).hexdigest()
         payload_hash = self._calculate_payload_hash(
             qr_code=qr_code,
             weight=weight,
@@ -355,16 +386,26 @@ class MeasurementStore:
             camera_id=camera_id,
             analysis_id=analysis_id,
             frame_sha256=frame_sha256,
+            qr_frame_sha256=qr_frame_sha256,
         )
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         event_token = hashlib.sha256(event_id.encode("utf-8")).hexdigest()[:8]
         image_path = self.capture_dir / f"{timestamp}_{event_token}_{uuid.uuid4().hex[:8]}.jpg"
+        qr_image_path = (
+            self.capture_dir / f"{timestamp}_{event_token}_{uuid.uuid4().hex[:8]}_qr.jpg"
+            if qr_jpeg_bytes
+            else None
+        )
         try:
             image_path.write_bytes(jpeg_bytes)
+            if qr_image_path is not None:
+                qr_image_path.write_bytes(qr_jpeg_bytes)
         except OSError as exc:
             image_path.unlink(missing_ok=True)
-            raise OSError(f"Cannot write capture image: {image_path}") from exc
+            if qr_image_path is not None:
+                qr_image_path.unlink(missing_ok=True)
+            raise OSError("Cannot write complete core + QR evidence pair") from exc
 
         sync_status = "pending" if needs_sync else "local"
         try:
@@ -374,6 +415,8 @@ class MeasurementStore:
                 ).fetchone()
                 if existing is not None:
                     image_path.unlink(missing_ok=True)
+                    if qr_image_path is not None:
+                        qr_image_path.unlink(missing_ok=True)
                     if str(existing["payload_hash"]) == payload_hash:
                         return SaveResult(self._from_row(existing), duplicate=True)
                     raise EventIdConflictError(event_id)
@@ -384,8 +427,8 @@ class MeasurementStore:
                         event_id, qr_code, weight, unit, captured_at, image_path,
                         weight_source, qr_source, sync_status, weight_raw, weight_stable,
                         gateway_id, station_id, camera_id, analysis_id,
-                        frame_sha256, payload_hash
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        frame_sha256, qr_image_path, qr_frame_sha256, payload_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         event_id,
@@ -404,6 +447,8 @@ class MeasurementStore:
                         camera_id,
                         analysis_id,
                         frame_sha256,
+                        str(qr_image_path.resolve()) if qr_image_path is not None else "",
+                        qr_frame_sha256,
                         payload_hash,
                     ),
                 )
@@ -417,6 +462,8 @@ class MeasurementStore:
                     "SELECT * FROM measurements WHERE event_id = ?", (event_id,)
                 ).fetchone()
             image_path.unlink(missing_ok=True)
+            if qr_image_path is not None:
+                qr_image_path.unlink(missing_ok=True)
             if existing is not None and str(existing["payload_hash"]) == payload_hash:
                 return SaveResult(self._from_row(existing), duplicate=True)
             if existing is not None:
@@ -424,11 +471,15 @@ class MeasurementStore:
             raise
         except Exception:
             image_path.unlink(missing_ok=True)
+            if qr_image_path is not None:
+                qr_image_path.unlink(missing_ok=True)
             raise
 
         saved = self.get(event_id)
         if saved is None:  # pragma: no cover - protects against external DB corruption.
             image_path.unlink(missing_ok=True)
+            if qr_image_path is not None:
+                qr_image_path.unlink(missing_ok=True)
             raise RuntimeError(f"Inserted event cannot be read back: {event_id}")
         return SaveResult(saved, duplicate=False)
 
@@ -464,6 +515,18 @@ class MeasurementStore:
             analysis_id=str(row["analysis_id"]),
             frame_sha256=str(row["frame_sha256"]),
             payload_hash=str(row["payload_hash"]),
+            qr_image_path=str(row["qr_image_path"]),
+            remote_qr_image_url=(
+                str(row["remote_qr_image_url"])
+                if row["remote_qr_image_url"] is not None
+                else None
+            ),
+            remote_qr_image_public_id=(
+                str(row["remote_qr_image_public_id"])
+                if row["remote_qr_image_public_id"] is not None
+                else None
+            ),
+            qr_frame_sha256=str(row["qr_frame_sha256"]),
         )
 
     def get(self, event_id: str) -> Measurement | None:
@@ -496,6 +559,8 @@ class MeasurementStore:
         remote_id: int | None = None,
         remote_image_url: str | None = None,
         remote_image_public_id: str | None = None,
+        remote_qr_image_url: str | None = None,
+        remote_qr_image_public_id: str | None = None,
     ) -> None:
         now = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
         with self._lock:
@@ -504,7 +569,8 @@ class MeasurementStore:
                 UPDATE measurements
                 SET sync_status = 'synced', sync_error = NULL, next_retry_at = NULL,
                     last_attempt_at = ?, synced_at = ?, remote_id = ?,
-                    remote_image_url = ?, remote_image_public_id = ?
+                    remote_image_url = ?, remote_image_public_id = ?,
+                    remote_qr_image_url = ?, remote_qr_image_public_id = ?
                 WHERE event_id = ?
                 """,
                 (
@@ -513,6 +579,8 @@ class MeasurementStore:
                     remote_id,
                     remote_image_url,
                     remote_image_public_id,
+                    remote_qr_image_url,
+                    remote_qr_image_public_id,
                     event_id,
                 ),
             )

@@ -51,6 +51,7 @@ class FakeOutageRecoverySender:
         payload: dict[str, object],
         _image_path: str,
         _token: str,
+        _qr_image_path: str | None = None,
     ) -> dict[str, object]:
         if not self.online:
             self.outage_attempts += 1

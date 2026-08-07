@@ -27,8 +27,8 @@ def test_outbox_syncs_committed_measurement(tmp_path) -> None:
     )
     sent: list[tuple] = []
 
-    def fake_send(url, payload, image_path, token):
-        sent.append((url, payload, image_path, token))
+    def fake_send(url, payload, image_path, token, qr_image_path=None):
+        sent.append((url, payload, image_path, token, qr_image_path))
         return {
             "ok": True,
             "event_id": measurement.event_id,
@@ -92,6 +92,43 @@ def test_outbox_accepts_core_image_ack_and_persists_it(tmp_path) -> None:
     assert saved is not None
     assert saved.remote_image_url == "https://images.example/core.jpg"
     assert saved.remote_image_public_id == "roll-captures/core-weight/event"
+
+
+def test_outbox_requires_and_persists_qr_image_ack_for_two_image_event(tmp_path) -> None:
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    measurement = store.save(
+        "ROLL-TWO-IMAGES-001",
+        1.04,
+        "kg",
+        np.zeros((40, 60, 3), dtype=np.uint8),
+        "camera-gemini:test-ui",
+        needs_sync=True,
+        qr_source="camera-second:opencv",
+        qr_frame=np.full((50, 70, 3), 240, dtype=np.uint8),
+    )
+    sent_qr_paths: list[str | None] = []
+
+    def fake_send(url, payload, image_path, token, qr_image_path=None):
+        sent_qr_paths.append(qr_image_path)
+        return {
+            "ok": True,
+            "event_id": measurement.event_id,
+            "id": 202,
+            "core_image_url": "https://images.example/core.jpg",
+            "core_image_public_id": "roll-captures/core-weight/event",
+            "qr_image_url": "https://images.example/qr.jpg",
+            "qr_image_public_id": "roll-captures/product-qr/event",
+        }
+
+    worker = OutboxSyncWorker(store, "https://example.test", "token", send=fake_send)
+    assert worker.sync_once() == 1
+    saved = store.get(measurement.event_id)
+
+    assert sent_qr_paths == [measurement.qr_image_path]
+    assert saved is not None
+    assert saved.remote_qr_image_url == "https://images.example/qr.jpg"
+    assert saved.remote_qr_image_public_id == "roll-captures/product-qr/event"
+    store.close()
 
 
 def test_outbox_keeps_failed_event_for_retry(tmp_path) -> None:
@@ -207,12 +244,15 @@ def test_http_client_sends_image_and_device_token(tmp_path) -> None:
     thread.start()
     image_path = tmp_path / "capture.jpg"
     image_path.write_bytes(b"\xff\xd8test-jpeg\xff\xd9")
+    qr_image_path = tmp_path / "qr.jpg"
+    qr_image_path.write_bytes(b"\xff\xd8test-qr-jpeg\xff\xd9")
     try:
         response = post_measurement(
             f"http://127.0.0.1:{server.server_port}/ingest",
             {"event_id": "test-event", "qr_code": "ROLL-HTTP-001"},
             image_path,
             "secret-token",
+            qr_image_path=qr_image_path,
         )
     finally:
         server.shutdown()
@@ -223,3 +263,5 @@ def test_http_client_sends_image_and_device_token(tmp_path) -> None:
     assert received["token"] == "secret-token"
     assert base64.b64decode(received["body"]["image_base64"]) == image_path.read_bytes()
     assert received["body"]["image_role"] == "core_weight"
+    assert base64.b64decode(received["body"]["qr_image_base64"]) == qr_image_path.read_bytes()
+    assert received["body"]["qr_image_role"] == "product_qr"

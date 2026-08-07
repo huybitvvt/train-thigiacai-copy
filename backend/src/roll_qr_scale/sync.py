@@ -7,7 +7,10 @@ from .api_client import post_measurement, validate_ingest_response
 from .storage import Measurement, MeasurementStore
 
 
-SendFunction = Callable[[str, dict[str, object], str, str], dict[str, object]]
+SendFunction = Callable[
+    [str, dict[str, object], str, str, str | None],
+    dict[str, object],
+]
 
 
 def _default_send(
@@ -15,8 +18,15 @@ def _default_send(
     payload: dict[str, object],
     image_path: str,
     token: str,
+    qr_image_path: str | None,
 ) -> dict[str, object]:
-    return post_measurement(url, payload, image_path, token)
+    return post_measurement(
+        url,
+        payload,
+        image_path,
+        token,
+        qr_image_path=qr_image_path,
+    )
 
 
 class OutboxSyncWorker:
@@ -67,22 +77,28 @@ class OutboxSyncWorker:
                 measurement.api_payload(self.device_id),
                 measurement.image_path,
                 self.device_token,
+                measurement.qr_image_path or None,
             )
             validate_ingest_response(
                 response,
                 measurement.event_id,
                 require_remote_image=self.require_remote_image,
+                require_remote_qr_image=bool(measurement.qr_image_path),
             )
             remote_id = response.get("id")
             remote_image_url = response.get("core_image_url") or response.get("image_url")
             remote_image_public_id = (
                 response.get("core_image_public_id") or response.get("image_public_id")
             )
+            remote_qr_image_url = response.get("qr_image_url")
+            remote_qr_image_public_id = response.get("qr_image_public_id")
             self.store.mark_synced(
                 measurement.event_id,
                 int(remote_id) if remote_id is not None else None,
                 str(remote_image_url) if remote_image_url else None,
                 str(remote_image_public_id) if remote_image_public_id else None,
+                str(remote_qr_image_url) if remote_qr_image_url else None,
+                str(remote_qr_image_public_id) if remote_qr_image_public_id else None,
             )
             return True
         except Exception as exc:

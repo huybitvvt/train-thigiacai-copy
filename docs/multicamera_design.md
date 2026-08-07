@@ -72,7 +72,9 @@ Các bất biến bắt buộc:
 | `live` | Preview đang chạy | `Space` |
 | `analyzing` | Đã khóa frame, đang chờ/chạy FIFO | chọn station khác |
 | `review` | Có kết quả nhưng chưa đủ điều kiện tự động | sửa dữ liệu hoặc hủy |
-| `ready` | Ảnh đạt và có QR/cân | `Enter` hoặc hủy |
+| `awaiting-qr` | Đã giữ ảnh/số cân lõi, đang chờ ảnh QR thứ hai | `Q`, chọn ảnh QR hoặc hủy |
+| `decoding-qr` | Đang giải mã ảnh QR thứ hai | chọn station khác |
+| `ready` | Đủ ảnh cân lõi, số cân, ảnh QR và mã SP | `Enter` hoặc hủy |
 | `saving` | Đang commit local | retry sau lỗi; không chụp đè |
 | `error` | Phân tích thất bại nhưng frame vẫn được giữ | hủy rõ ràng |
 | `disconnected` | Camera đã gán bị mất | reconnect đúng camera |

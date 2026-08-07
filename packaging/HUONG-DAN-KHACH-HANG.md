@@ -86,12 +86,14 @@ bằng `ROLL_SCALE_STATION_COUNT` và đúng thứ tự `ROLL_SCALE_STATION_IDS`
 ## 3. Vận hành
 
 - Phím `1`, `2`, `3`: chọn trạm đang làm việc.
-- `Space`: chụp burst và nhận diện đúng camera đang chọn. Giữ yên hàng/cân
-  khoảng nửa giây cho đến khi trạng thái chuyển sang đang phân tích.
+- `Space`: chụp ảnh cân lõi và nhận diện đúng camera đang chọn. Giữ yên cân
+  cho đến khi trạng thái chuyển sang `CHỜ ẢNH QR`.
+- `Q`: sau khi có số cân lõi, đưa tem QR vào camera và chụp ảnh thứ hai. Mã SP
+  được tự điền từ ảnh này; ảnh cân lõi vẫn được giữ nguyên.
 - `Backspace`: bỏ ngay lần đang xem, không hỏi xác nhận. Khi đang đặt con trỏ
   trong ô QR hoặc số cân, Backspace vẫn chỉ xóa ký tự như bình thường.
-- Kiểm tra QR và số cân; có thể sửa trước khi lưu.
-- `Enter`: lưu đúng phiên đang chọn. Sau khi lưu thành công, giao diện tự chọn
+- Kiểm tra số cân, mã SP và cả hai ảnh bằng chứng.
+- `Enter`: lưu mã SP + số cân lõi + hai ảnh trong đúng một event. Sau khi lưu thành công, giao diện tự chọn
   trạm tiếp theo nếu đang bật luân phiên.
 - Không rút camera hoặc tắt máy khi còn bản ghi chưa đồng bộ.
 

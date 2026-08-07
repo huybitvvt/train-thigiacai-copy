@@ -31,12 +31,16 @@ create table if not exists public.measurements (
   core_image_path text,
   core_image_url text,
   core_image_public_id text,
+  qr_image_path text,
+  qr_image_url text,
+  qr_image_public_id text,
   device_id text references public.devices(id),
   gateway_id text,
   station_id text,
   camera_id text,
   analysis_id text,
   frame_sha256 text,
+  qr_frame_sha256 text,
   payload_hash text,
   weight_source text not null default 'manual',
   qr_source text not null default 'unknown',
@@ -57,11 +61,15 @@ alter table public.measurements
   add column if not exists core_image_path text,
   add column if not exists core_image_url text,
   add column if not exists core_image_public_id text,
+  add column if not exists qr_image_path text,
+  add column if not exists qr_image_url text,
+  add column if not exists qr_image_public_id text,
   add column if not exists gateway_id text,
   add column if not exists station_id text,
   add column if not exists camera_id text,
   add column if not exists analysis_id text,
   add column if not exists frame_sha256 text,
+  add column if not exists qr_frame_sha256 text,
   add column if not exists payload_hash text,
   add column if not exists weight_source text not null default 'manual',
   add column if not exists qr_source text not null default 'unknown',
@@ -185,12 +193,16 @@ create table if not exists public.can_tu_dong (
   core_image_path text,
   core_image_url text,
   core_image_public_id text,
+  qr_image_path text,
+  qr_image_url text,
+  qr_image_public_id text,
   device_id text references public.devices(id),
   gateway_id text,
   station_id text,
   camera_id text,
   analysis_id text,
   frame_sha256 text,
+  qr_frame_sha256 text,
   payload_hash text,
   weight_source text not null default 'manual',
   qr_source text not null default 'unknown',
@@ -215,11 +227,15 @@ alter table public.can_tu_dong
   add column if not exists core_image_path text,
   add column if not exists core_image_url text,
   add column if not exists core_image_public_id text,
+  add column if not exists qr_image_path text,
+  add column if not exists qr_image_url text,
+  add column if not exists qr_image_public_id text,
   add column if not exists gateway_id text,
   add column if not exists station_id text,
   add column if not exists camera_id text,
   add column if not exists analysis_id text,
   add column if not exists frame_sha256 text,
+  add column if not exists qr_frame_sha256 text,
   add column if not exists payload_hash text;
 
 update public.can_tu_dong
@@ -281,6 +297,9 @@ create index if not exists can_tu_dong_image_public_id_idx
 create index if not exists can_tu_dong_core_image_public_id_idx
   on public.can_tu_dong (core_image_public_id)
   where core_image_public_id is not null;
+create index if not exists can_tu_dong_qr_image_public_id_idx
+  on public.can_tu_dong (qr_image_public_id)
+  where qr_image_public_id is not null;
 
 alter table public.can_tu_dong enable row level security;
 revoke all on table public.can_tu_dong from anon, authenticated;
@@ -289,8 +308,10 @@ insert into public.can_tu_dong (
   id, event_id, qr_code, weight, tare_weight, unit, captured_at,
   image_path, image_url, image_public_id,
   core_image_path, core_image_url, core_image_public_id,
+  qr_image_path, qr_image_url, qr_image_public_id,
   device_id, weight_source,
-  gateway_id, station_id, camera_id, analysis_id, frame_sha256, payload_hash,
+  gateway_id, station_id, camera_id, analysis_id, frame_sha256, qr_frame_sha256,
+  payload_hash,
   qr_source, weight_kind, status, confirmed_at, metadata, created_at
 )
 overriding system value
@@ -298,8 +319,10 @@ select
   id, event_id, qr_code, weight, tare_weight, unit, captured_at,
   image_path, image_url, image_public_id,
   coalesce(core_image_path, image_path), coalesce(core_image_url, image_url),
-  coalesce(core_image_public_id, image_public_id), device_id, weight_source,
-  gateway_id, station_id, camera_id, analysis_id, frame_sha256, payload_hash,
+  coalesce(core_image_public_id, image_public_id),
+  qr_image_path, qr_image_url, qr_image_public_id, device_id, weight_source,
+  gateway_id, station_id, camera_id, analysis_id, frame_sha256, qr_frame_sha256,
+  payload_hash,
   qr_source, weight_kind, status, confirmed_at, metadata, created_at
 from public.measurements
 on conflict (event_id) do nothing;

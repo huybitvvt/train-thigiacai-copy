@@ -15,6 +15,7 @@ def validate_ingest_response(
     expected_event_id: str,
     *,
     require_remote_image: bool = True,
+    require_remote_qr_image: bool = False,
 ) -> dict[str, object]:
     if response.get("ok") is not True:
         raise IngestResponseError("ingest response did not report ok=true")
@@ -42,6 +43,12 @@ def validate_ingest_response(
             raise IngestResponseError(
                 "ingest response must confirm persisted core-weight evidence"
             )
+    if require_remote_qr_image:
+        qr_pair = (response.get("qr_image_url"), response.get("qr_image_public_id"))
+        if not all(isinstance(value, str) and value.strip() for value in qr_pair):
+            raise IngestResponseError(
+                "ingest response must confirm persisted QR evidence"
+            )
     return response
 
 
@@ -51,6 +58,8 @@ def post_measurement(
     image_path: str | Path,
     token: str,
     timeout: float = 10.0,
+    *,
+    qr_image_path: str | Path | None = None,
 ) -> dict[str, object]:
     body = dict(payload)
     body["image_base64"] = base64.b64encode(Path(image_path).read_bytes()).decode("ascii")
@@ -58,6 +67,11 @@ def post_measurement(
     # Keep the established image_base64 field so older deployed Edge Functions
     # remain compatible while newer functions persist it under core_image_*.
     body["image_role"] = "core_weight"
+    if qr_image_path:
+        body["qr_image_base64"] = base64.b64encode(
+            Path(qr_image_path).read_bytes()
+        ).decode("ascii")
+        body["qr_image_role"] = "product_qr"
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",

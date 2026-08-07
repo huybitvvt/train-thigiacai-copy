@@ -748,8 +748,16 @@ def run_upload(args: argparse.Namespace) -> int:
             payload: dict[str, object],
             image_path: str,
             token: str,
+            qr_image_path: str | None = None,
         ) -> dict[str, object]:
-            return post_measurement(url, payload, image_path, token, timeout=args.timeout)
+            return post_measurement(
+                url,
+                payload,
+                image_path,
+                token,
+                timeout=args.timeout,
+                qr_image_path=qr_image_path,
+            )
 
         worker = OutboxSyncWorker(
             store,

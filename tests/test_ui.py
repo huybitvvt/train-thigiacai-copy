@@ -57,11 +57,45 @@ def test_ui_capture_decodes_qr_and_saves_stable_manual_weight(tmp_path) -> None:
     )
 
 
+def test_ui_capture_reads_and_persists_second_qr_evidence_image(tmp_path) -> None:
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(store, None, None, None)
+    core_frame = make_qr_frame("CORE-EVIDENCE-ONLY")
+    qr_frame = make_qr_frame("PRODUCT-QR-SECOND-001")
+
+    result = service.capture(
+        "",
+        1.04,
+        "kg",
+        core_frame,
+        qr_frame=qr_frame,
+    )
+    saved = store.get(str(result["event_id"]))
+
+    assert result["qr_code"] == "PRODUCT-QR-SECOND-001"
+    assert saved is not None
+    assert Path(saved.image_path).is_file()
+    assert Path(saved.qr_image_path).is_file()
+    assert saved.qr_source.startswith("camera-second:")
+    assert len(saved.qr_frame_sha256) == 64
+
+    with pytest.raises(ValueError, match="không khớp QR"):
+        service.capture(
+            "DIFFERENT-PRODUCT",
+            1.04,
+            "kg",
+            core_frame,
+            qr_frame=qr_frame,
+        )
+    service.close()
+    store.close()
+
+
 def test_ui_save_waits_for_same_event_code_weight_and_image_cloud_ack(tmp_path) -> None:
     store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
     sent: list[tuple[dict[str, object], bytes]] = []
 
-    def fake_send(url, payload, image_path, token):
+    def fake_send(url, payload, image_path, token, qr_image_path=None):
         sent.append((dict(payload), Path(image_path).read_bytes()))
         return {
             "ok": True,
@@ -779,17 +813,19 @@ def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
         "['1','2','3']",
         "refreshCameraDevices(requestPermission=false)",
         "session.stream!==stream||session.streamGeneration!==generation",
-        "ĐỦ DỮ LIỆU · ",
+        "ĐỦ HAI ẢNH · ",
         "prepareNextCapture('',session)",
-        "'awaiting-code'",
+        "'awaiting-qr'",
         "function completionReady(session)",
-        "ĐÃ CÂN LÕI · CHỜ MÃ NHẬP SP",
-        "ẢNH TL LÕI",
+        "ĐÃ CÂN LÕI · CHỜ ẢNH QR",
+        'id="qrCaptureBtn"',
+        'id="qrEvidencePreview"',
+        "qr_image:session.qrImage",
         "Nhanh · Flash-Lite · 10s",
         "Chính xác · Pro · 30s",
         "savedStationIndex=stations.indexOf(session)",
         "if(session===current())analyzeCurrent()",
-        "captureEditor=event.target===captureQr||event.target===weight",
+        "captureEditor=event.target===weight",
         "const failedStream=session.stream",
         "this.hydratedPending=Boolean(config.event_id)",
         "function pollPendingSessions()",

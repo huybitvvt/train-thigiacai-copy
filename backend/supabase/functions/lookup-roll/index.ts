@@ -56,7 +56,8 @@ Deno.serve(async (request: Request) => {
       "id,event_id,qr_code,weight,tare_weight,net_weight,unit,captured_at," +
       "device_id,gateway_id,station_id,camera_id,analysis_id,frame_sha256,payload_hash," +
       "weight_source,qr_source,image_path,image_url,image_public_id," +
-      "core_image_path,core_image_url,core_image_public_id,status",
+      "core_image_path,core_image_url,core_image_public_id," +
+      "qr_image_path,qr_image_url,qr_image_public_id,qr_frame_sha256,status",
     )
     .eq("qr_code", qrCode)
     .eq("status", "confirmed")
