@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 import threading
+import base64
+from pathlib import Path
 from collections.abc import Callable
 
 from .api_client import post_measurement, validate_ingest_response
 from .storage import Measurement, MeasurementStore
 
 
-SendFunction = Callable[
-    [str, dict[str, object], str, str, str | None],
-    dict[str, object],
-]
+SendFunction = Callable[[str, dict[str, object], str, str], dict[str, object]]
 
 
 def _default_send(
@@ -18,15 +17,8 @@ def _default_send(
     payload: dict[str, object],
     image_path: str,
     token: str,
-    qr_image_path: str | None,
 ) -> dict[str, object]:
-    return post_measurement(
-        url,
-        payload,
-        image_path,
-        token,
-        qr_image_path=qr_image_path,
-    )
+    return post_measurement(url, payload, image_path, token)
 
 
 class OutboxSyncWorker:
@@ -66,39 +58,42 @@ class OutboxSyncWorker:
 
     def _run(self) -> None:
         while not self._stop.is_set():
-            self.sync_once()
+            # A failed event is only retried by an explicit/manual action.
+            # New captures are sent synchronously by sync_event after the
+            # operator presses LƯU, so historical failures must not leak later.
+            self.sync_once(retry_failed=False)
             self._wake.wait(self.interval)
             self._wake.clear()
 
     def _sync_measurement(self, measurement: Measurement) -> bool:
         try:
+            payload = measurement.api_payload(self.device_id)
+            if measurement.product_image_path:
+                payload["product_image_base64"] = base64.b64encode(
+                    Path(measurement.product_image_path).read_bytes()
+                ).decode("ascii")
             response = self.send(
                 self.api_url,
-                measurement.api_payload(self.device_id),
+                payload,
                 measurement.image_path,
                 self.device_token,
-                measurement.qr_image_path or None,
             )
             validate_ingest_response(
                 response,
                 measurement.event_id,
                 require_remote_image=self.require_remote_image,
-                require_remote_qr_image=bool(measurement.qr_image_path),
+                require_product_image=bool(measurement.product_image_path),
             )
             remote_id = response.get("id")
             remote_image_url = response.get("core_image_url") or response.get("image_url")
             remote_image_public_id = (
                 response.get("core_image_public_id") or response.get("image_public_id")
             )
-            remote_qr_image_url = response.get("qr_image_url")
-            remote_qr_image_public_id = response.get("qr_image_public_id")
             self.store.mark_synced(
                 measurement.event_id,
                 int(remote_id) if remote_id is not None else None,
                 str(remote_image_url) if remote_image_url else None,
                 str(remote_image_public_id) if remote_image_public_id else None,
-                str(remote_qr_image_url) if remote_qr_image_url else None,
-                str(remote_qr_image_public_id) if remote_qr_image_public_id else None,
             )
             return True
         except Exception as exc:
@@ -116,10 +111,20 @@ class OutboxSyncWorker:
                 return True
             return self._sync_measurement(measurement)
 
-    def sync_once(self, limit: int = 20, include_deferred: bool = False) -> int:
+    def sync_once(
+        self,
+        limit: int = 20,
+        include_deferred: bool = False,
+        *,
+        retry_failed: bool = True,
+    ) -> int:
         with self._sync_lock:
             synced = 0
-            for measurement in self.store.pending(limit, include_deferred=include_deferred):
+            for measurement in self.store.pending(
+                limit,
+                include_deferred=include_deferred,
+                include_failed=retry_failed,
+            ):
                 if self._sync_measurement(measurement):
                     synced += 1
             return synced

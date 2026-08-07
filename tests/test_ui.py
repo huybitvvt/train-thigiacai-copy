@@ -57,45 +57,11 @@ def test_ui_capture_decodes_qr_and_saves_stable_manual_weight(tmp_path) -> None:
     )
 
 
-def test_ui_capture_reads_and_persists_second_qr_evidence_image(tmp_path) -> None:
-    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
-    service = StationUIService(store, None, None, None)
-    core_frame = make_qr_frame("CORE-EVIDENCE-ONLY")
-    qr_frame = make_qr_frame("PRODUCT-QR-SECOND-001")
-
-    result = service.capture(
-        "",
-        1.04,
-        "kg",
-        core_frame,
-        qr_frame=qr_frame,
-    )
-    saved = store.get(str(result["event_id"]))
-
-    assert result["qr_code"] == "PRODUCT-QR-SECOND-001"
-    assert saved is not None
-    assert Path(saved.image_path).is_file()
-    assert Path(saved.qr_image_path).is_file()
-    assert saved.qr_source.startswith("camera-second:")
-    assert len(saved.qr_frame_sha256) == 64
-
-    with pytest.raises(ValueError, match="không khớp QR"):
-        service.capture(
-            "DIFFERENT-PRODUCT",
-            1.04,
-            "kg",
-            core_frame,
-            qr_frame=qr_frame,
-        )
-    service.close()
-    store.close()
-
-
 def test_ui_save_waits_for_same_event_code_weight_and_image_cloud_ack(tmp_path) -> None:
     store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
     sent: list[tuple[dict[str, object], bytes]] = []
 
-    def fake_send(url, payload, image_path, token, qr_image_path=None):
+    def fake_send(url, payload, image_path, token):
         sent.append((dict(payload), Path(image_path).read_bytes()))
         return {
             "ok": True,
@@ -760,10 +726,22 @@ def test_ui_uses_full_width_single_column_capture_layout() -> None:
     assert "main{width:100%" in TEST_UI_HTML
 
 
-def test_core_first_workflow_does_not_use_detected_qr_as_product_code() -> None:
-    assert "session.qr='';session.weight=data.weight_found" in TEST_UI_HTML
+def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "session.qr=data.qr_code||''" not in TEST_UI_HTML
-    assert "Gemini đọc cân lõi" in TEST_UI_HTML
+    assert "if(isProduct){session.productAnalysis=data" in TEST_UI_HTML
+    assert "if(data.qr_found&&String(data.qr_code||'').trim()&&!String(session.qr||'').trim())session.qr=String(data.qr_code).trim()" in TEST_UI_HTML
+    assert "$('analyzeProductBtn').disabled=busy||!coreReady(session)" in TEST_UI_HTML
+    assert "['analyzing','awaiting-weight','awaiting-code','ready','review']" in TEST_UI_HTML
+    assert "if(isProduct&&!coreReady(session))" in TEST_UI_HTML
+    assert 'id="analyzeCoreBtn"' in TEST_UI_HTML
+    assert 'id="analyzeProductBtn"' in TEST_UI_HTML
+    assert 'id="productWeight"' in TEST_UI_HTML
+    assert "analyzeCurrent('core')" in TEST_UI_HTML
+    assert "analyzeCurrent('product')" in TEST_UI_HTML
+    assert "PRODUCT_WEIGHT=" in TEST_UI_HTML
+    assert "function productReady(session)" in TEST_UI_HTML
+    assert "ĐÃ CÂN LÕI · CHỜ CÂN SẢN PHẨM" in TEST_UI_HTML
+    assert "Gemini đọc " in TEST_UI_HTML
 
 
 def test_ui_enables_local_yolo_model_by_default(monkeypatch, tmp_path) -> None:
@@ -813,23 +791,26 @@ def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
         "['1','2','3']",
         "refreshCameraDevices(requestPermission=false)",
         "session.stream!==stream||session.streamGeneration!==generation",
-        "ĐỦ HAI ẢNH · ",
+        "ĐỦ DỮ LIỆU · ",
         "prepareNextCapture('',session)",
-        "'awaiting-qr'",
+        "'awaiting-code'",
+        "'awaiting-weight'",
         "function completionReady(session)",
-        "ĐÃ CÂN LÕI · CHỜ ẢNH QR",
-        'id="qrCaptureBtn"',
-        'id="qrEvidencePreview"',
-        "qr_image:session.qrImage",
+        "function productReady(session)",
+        "ĐÃ CÂN LÕI · CHỜ CÂN SẢN PHẨM",
+        "ẢNH TL LÕI",
+        'id="analyzeCoreBtn"',
+        'id="analyzeProductBtn"',
+        'id="productWeight"',
+        "analyzeCurrent('product')",
         "Nhanh · Flash-Lite · 10s",
         "Chính xác · Pro · 30s",
         "savedStationIndex=stations.indexOf(session)",
-        "if(session===current())analyzeCurrent()",
-        "captureEditor=event.target===weight",
+        "captureEditor=event.target===captureQr||event.target===weight||event.target===productWeight",
         "const failedStream=session.stream",
         "this.hydratedPending=Boolean(config.event_id)",
         "function pollPendingSessions()",
-        "stations.length===1)loadDemo()",
+        "Chọn camera hoặc ảnh thực tế, rồi chụp cân lõi / cân sản phẩm.",
         "session.deviceId&&!session.hasUnsavedReview()",
         "weight_frames:weightFrames",
         "captureWeightBurst(session)",

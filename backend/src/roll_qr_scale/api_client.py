@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import json
 import urllib.request
+import urllib.parse
+import urllib.error
 from pathlib import Path
 
 
@@ -10,12 +12,155 @@ class IngestResponseError(RuntimeError):
     """The cloud did not acknowledge the exact event that was sent."""
 
 
+def fetch_remote_measurements(
+    url: str,
+    token: str,
+    *,
+    limit: int = 50,
+    timeout: float = 10.0,
+) -> list[dict[str, object]]:
+    separator = "&" if "?" in url else "?"
+    request_url = f"{url}{separator}{urllib.parse.urlencode({'limit': max(1, min(limit, 200))})}"
+    request = urllib.request.Request(
+        request_url,
+        headers={"Accept": "application/json", "X-Device-Token": token},
+        method="GET",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        parsed = json.loads(response.read().decode("utf-8"))
+    if not isinstance(parsed, dict) or parsed.get("ok") is not True:
+        raise RuntimeError("Supabase list response is invalid")
+    items = parsed.get("items")
+    if not isinstance(items, list):
+        raise RuntimeError("Supabase list response has no items")
+    return [item for item in items if isinstance(item, dict)]
+
+
+def fetch_supabase_table(
+    supabase_url: str,
+    publishable_key: str,
+    *,
+    limit: int = 50,
+    timeout: float = 10.0,
+) -> list[dict[str, object]]:
+    query = urllib.parse.urlencode({
+        "select": "*",
+        "order": "captured_at.desc",
+        "limit": max(1, min(limit, 200)),
+    })
+    request = urllib.request.Request(
+        f"{supabase_url.rstrip('/')}/rest/v1/can_tu_dong?{query}",
+        headers={
+            "Accept": "application/json",
+            "apikey": publishable_key,
+            "Authorization": f"Bearer {publishable_key}",
+        },
+        method="GET",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        parsed = json.loads(response.read().decode("utf-8"))
+    if not isinstance(parsed, list):
+        raise RuntimeError("Supabase can_tu_dong response is invalid")
+    return [item for item in parsed if isinstance(item, dict)]
+
+
+def persist_product_evidence(
+    supabase_url: str,
+    service_key: str,
+    *,
+    event_id: str,
+    gateway_id: str,
+    image_path: str | Path,
+    product_weight: float,
+    timeout: float = 20.0,
+) -> dict[str, object]:
+    object_path = f"{gateway_id}/product-weight/{event_id}.jpg"
+    encoded_path = urllib.parse.quote(object_path, safe="/")
+    auth_headers = {
+        "apikey": service_key,
+        "Authorization": f"Bearer {service_key}",
+    }
+    upload = urllib.request.Request(
+        f"{supabase_url.rstrip('/')}/storage/v1/object/roll-captures/{encoded_path}",
+        data=Path(image_path).read_bytes(),
+        headers={**auth_headers, "Content-Type": "image/jpeg", "x-upsert": "true"},
+        method="POST",
+    )
+    with urllib.request.urlopen(upload, timeout=timeout):
+        pass
+    stable_url = (
+        f"{supabase_url.rstrip('/')}/storage/v1/object/authenticated/"
+        f"roll-captures/{encoded_path}"
+    )
+    product_fields = {
+        "product_weight": float(product_weight),
+        "product_image_path": object_path,
+        "product_image_url": stable_url,
+        "product_image_public_id": object_path,
+    }
+    patch_url = (
+        f"{supabase_url.rstrip('/')}/rest/v1/can_tu_dong?"
+        f"event_id=eq.{urllib.parse.quote(event_id)}&select=*"
+    )
+    def patch_row(fields: dict[str, object]) -> list[object]:
+        patch = urllib.request.Request(
+            patch_url,
+            data=json.dumps(fields).encode("utf-8"),
+            headers={
+                **auth_headers,
+                "Content-Type": "application/json",
+                "Prefer": "return=representation",
+            },
+            method="PATCH",
+        )
+        with urllib.request.urlopen(patch, timeout=timeout) as response:
+            value = json.loads(response.read().decode("utf-8"))
+        return value if isinstance(value, list) else []
+    try:
+        rows = patch_row(product_fields)
+    except urllib.error.HTTPError as exc:
+        if exc.code != 400:
+            raise
+        product_fields.pop("product_weight", None)
+        rows = patch_row(product_fields)
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+        raise RuntimeError("Supabase product evidence update matched no event")
+    return rows[0]
+
+
+def sign_storage_image(
+    supabase_url: str,
+    service_key: str,
+    object_path: str,
+    *,
+    expires_in: int = 3600,
+    timeout: float = 10.0,
+) -> str:
+    encoded_path = urllib.parse.quote(object_path, safe="/")
+    request = urllib.request.Request(
+        f"{supabase_url.rstrip('/')}/storage/v1/object/sign/roll-captures/{encoded_path}",
+        data=json.dumps({"expiresIn": expires_in}).encode("utf-8"),
+        headers={
+            "apikey": service_key,
+            "Authorization": f"Bearer {service_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    signed = payload.get("signedURL") if isinstance(payload, dict) else None
+    if not isinstance(signed, str) or not signed:
+        raise RuntimeError("Supabase Storage did not return a signed URL")
+    return f"{supabase_url.rstrip('/')}/storage/v1{signed}"
+
+
 def validate_ingest_response(
     response: dict[str, object],
     expected_event_id: str,
     *,
     require_remote_image: bool = True,
-    require_remote_qr_image: bool = False,
+    require_product_image: bool = False,
 ) -> dict[str, object]:
     if response.get("ok") is not True:
         raise IngestResponseError("ingest response did not report ok=true")
@@ -43,11 +188,14 @@ def validate_ingest_response(
             raise IngestResponseError(
                 "ingest response must confirm persisted core-weight evidence"
             )
-    if require_remote_qr_image:
-        qr_pair = (response.get("qr_image_url"), response.get("qr_image_public_id"))
-        if not all(isinstance(value, str) and value.strip() for value in qr_pair):
+    if require_product_image:
+        product_pair = (
+            response.get("product_image_url"),
+            response.get("product_image_public_id"),
+        )
+        if not all(isinstance(value, str) and value.strip() for value in product_pair):
             raise IngestResponseError(
-                "ingest response must confirm persisted QR evidence"
+                "ingest response must confirm persisted product-weight evidence"
             )
     return response
 
@@ -58,8 +206,6 @@ def post_measurement(
     image_path: str | Path,
     token: str,
     timeout: float = 10.0,
-    *,
-    qr_image_path: str | Path | None = None,
 ) -> dict[str, object]:
     body = dict(payload)
     body["image_base64"] = base64.b64encode(Path(image_path).read_bytes()).decode("ascii")
@@ -67,11 +213,6 @@ def post_measurement(
     # Keep the established image_base64 field so older deployed Edge Functions
     # remain compatible while newer functions persist it under core_image_*.
     body["image_role"] = "core_weight"
-    if qr_image_path:
-        body["qr_image_base64"] = base64.b64encode(
-            Path(qr_image_path).read_bytes()
-        ).decode("ascii")
-        body["qr_image_role"] = "product_qr"
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",

@@ -7,11 +7,13 @@ import hmac
 import json
 import math
 import os
+import re
 import inspect
 import sys
 import threading
 import time
 import urllib.parse
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -27,6 +29,7 @@ from .gemini_weight import (
     GeminiWeightReader,
 )
 from .capture_gate import frame_fingerprint
+from .api_client import fetch_supabase_table, persist_product_evidence, sign_storage_image
 from .inference_queue import InferenceCoordinator, InferenceQueueFull
 from .lookup_client import lookup_roll
 from .quality import FrameQuality, assess_frame_quality
@@ -297,6 +300,52 @@ class StationUIService:
             "stations": stations,
             "inference": self.inference.status().as_dict(),
         }
+
+    def stage_evidence_step(
+        self,
+        frame: np.ndarray,
+        *,
+        event_id: str,
+        station_id: str,
+        kind: str,
+        weight: float,
+        unit: str,
+        qr_code: str = "",
+    ) -> dict[str, object]:
+        """Durably save each accepted weighing step before final confirmation."""
+        if kind not in {"core", "product"}:
+            raise ValueError("capture_kind phải là core hoặc product")
+        if station_id not in {str(item["station_id"]) for item in self.station_configs}:
+            raise ValueError("station_id không hợp lệ")
+        uuid.UUID(event_id)
+        folder = self.sessions.staging_dir / station_id
+        folder.mkdir(parents=True, exist_ok=True)
+        image_path = folder / f"{event_id}_{kind}.jpg"
+        metadata_path = folder / f"{event_id}_steps.json"
+        encoded_ok, encoded = cv2.imencode(".jpg", frame)
+        if not encoded_ok:
+            raise OSError("Không mã hóa được ảnh bằng chứng")
+        with self._lock:
+            image_path.write_bytes(encoded.tobytes())
+            metadata: dict[str, object] = {"event_id": event_id, "station_id": station_id}
+            if metadata_path.is_file():
+                try:
+                    loaded = json.loads(metadata_path.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        metadata.update(loaded)
+                except (OSError, json.JSONDecodeError):
+                    pass
+            metadata[kind] = {
+                "image_path": str(image_path.resolve()),
+                "weight": float(weight),
+                "unit": unit,
+                "qr_code": qr_code.strip(),
+            }
+            metadata_path.write_text(
+                json.dumps(metadata, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        return {"image_path": str(image_path.resolve()), "metadata_path": str(metadata_path.resolve())}
 
     def diagnostic_path_for(self, station_id: str) -> Path | None:
         if self.diagnostic_image is None:
@@ -666,28 +715,16 @@ class StationUIService:
         vision_confirmed: bool = False,
         weight_raw: str = "",
         *,
+        product_frame: np.ndarray | None = None,
+        product_weight: float | None = None,
         event_id: str | None = None,
         analysis_id: str | None = None,
         station_id: str | None = None,
         camera_id: str | None = None,
         frame_sha256: str | None = None,
-        qr_frame: np.ndarray | None = None,
-        qr_frame_sha256: str | None = None,
     ) -> dict[str, object]:
         qr_code = qr_code.strip()
-        if qr_frame is not None:
-            decoded = self.decode_qr(qr_frame)
-            if not decoded.get("found"):
-                raise ValueError("Ảnh QR không đọc được; hãy chụp lại rõ hơn")
-            decoded_qr = str(decoded["qr_code"]).strip()
-            if qr_code and qr_code != decoded_qr:
-                raise ValueError("Mã SP không khớp QR trong ảnh thứ hai")
-            qr_code = decoded_qr
-            qr_source = f"camera-second:{decoded['decoder']}"
-            computed_qr_frame_sha = jpeg_sha256(encode_staged_jpeg(qr_frame))
-            if qr_frame_sha256 and qr_frame_sha256.lower() != computed_qr_frame_sha:
-                raise AnalysisBindingMismatch("qr_frame_sha256 không khớp ảnh QR gửi để lưu")
-        elif not qr_code:
+        if not qr_code:
             decoded = self.decode_qr(frame)
             if not decoded.get("found"):
                 raise ValueError("Chưa có QR; hãy quét mã hoặc đưa QR vào camera")
@@ -776,20 +813,50 @@ class StationUIService:
                 station_id=station_id or "",
                 camera_id=camera_id or "",
                 analysis_id=analysis_id or "",
-                qr_frame=qr_frame,
             )
             if not bound_capture:
                 self._recent[capture_key] = time.monotonic()
 
         if bound_capture:
             self.sessions.mark_saved(str(analysis_id))
+        if product_weight is not None:
+            self.store.attach_product_weight(measurement.event_id, product_weight)
+        if product_frame is not None:
+            self.store.attach_product_image(measurement.event_id, product_frame)
+            measurement = self.store.get(measurement.event_id) or measurement
         # Commit locally first, then synchronously confirm this exact event so
         # one operator click sends the product code, core weight and evidence
         # image together. A failed cloud attempt remains durable in the outbox.
         if self.sync_worker is not None:
             cloud_confirmed = self.sync_worker.sync_event(measurement.event_id)
-            if not cloud_confirmed:
-                self.sync_worker.notify()
+            if (
+                not cloud_confirmed
+                and product_weight is not None
+                and measurement.product_image_path
+            ):
+                supabase_url = os.environ.get("ROLL_SCALE_SUPABASE_URL", "").strip()
+                service_key = os.environ.get("ROLL_SCALE_SUPABASE_SERVICE_KEY", "").strip()
+                if supabase_url and service_key:
+                    try:
+                        remote = persist_product_evidence(
+                            supabase_url,
+                            service_key,
+                            event_id=measurement.event_id,
+                            gateway_id=self.gateway_id,
+                            image_path=measurement.product_image_path,
+                            product_weight=product_weight,
+                        )
+                        core_url = remote.get("core_image_url") or remote.get("image_url")
+                        core_public_id = remote.get("core_image_public_id") or remote.get("image_public_id")
+                        self.store.mark_synced(
+                            measurement.event_id,
+                            int(remote["id"]) if remote.get("id") is not None else None,
+                            str(core_url) if core_url else None,
+                            str(core_public_id) if core_public_id else None,
+                        )
+                        cloud_confirmed = True
+                    except Exception:
+                        cloud_confirmed = False
         saved = self.store.get(measurement.event_id)
         current = saved or measurement
         return {
@@ -809,11 +876,6 @@ class StationUIService:
             "remote_id": current.remote_id,
             "remote_image_url": current.remote_image_url,
             "remote_image_public_id": getattr(current, "remote_image_public_id", None),
-            "qr_frame_sha256": getattr(current, "qr_frame_sha256", ""),
-            "remote_qr_image_url": getattr(current, "remote_qr_image_url", None),
-            "remote_qr_image_public_id": getattr(
-                current, "remote_qr_image_public_id", None
-            ),
             "sync_error": current.sync_error,
             "pending_count": self.store.pending_count(),
         }
@@ -1192,6 +1254,24 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                 content_type = "image/png" if logo_path.suffix.lower() == ".png" else "image/jpeg"
                 self.send_bytes(200, content_type, logo_path.read_bytes())
                 return
+            if parsed.path == "/api/measurement-image":
+                query = urllib.parse.parse_qs(parsed.query)
+                event_id = query.get("event_id", [""])[0]
+                kind = query.get("kind", [""])[0]
+                measurement = store.get(event_id)
+                if measurement is None or kind not in {"core", "product"}:
+                    self.send_json(404, {"ok": False, "error": "image_not_found"})
+                    return
+                image_path = Path(
+                    measurement.image_path
+                    if kind == "core"
+                    else measurement.product_image_path
+                )
+                if not image_path.is_file():
+                    self.send_json(404, {"ok": False, "error": "image_not_found"})
+                    return
+                self.send_bytes(200, "image/jpeg", image_path.read_bytes())
+                return
             if parsed.path == "/api/status":
                 identity_status = service.status()
                 self.send_json(
@@ -1214,6 +1294,78 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         **identity_status,
                     },
                 )
+                return
+            if parsed.path == "/api/measurements":
+                try:
+                    limit = int(urllib.parse.parse_qs(parsed.query).get("limit", ["50"])[0])
+                except ValueError:
+                    limit = 50
+                supabase_url = os.environ.get("ROLL_SCALE_SUPABASE_URL", "").strip()
+                publishable_key = (
+                    os.environ.get("ROLL_SCALE_SUPABASE_SERVICE_KEY", "").strip()
+                    or os.environ.get("ROLL_SCALE_SUPABASE_PUBLISHABLE_KEY", "").strip()
+                )
+                if not supabase_url or not publishable_key:
+                    self.send_json(503, {"ok": False, "error": "supabase_not_configured"})
+                    return
+                try:
+                    remote_items = fetch_supabase_table(
+                        supabase_url,
+                        publishable_key,
+                        limit=limit,
+                    )
+                except Exception as exc:
+                    self.send_json(502, {"ok": False, "error": "supabase_list_failed", "message": str(exc)})
+                    return
+                items = []
+                for item in remote_items:
+                    core_url = item.get("core_image_url") or item.get("image_url")
+                    product_url = item.get("product_image_url")
+                    product_path = item.get("product_image_path")
+                    if isinstance(product_path, str) and product_path:
+                        try:
+                            product_url = sign_storage_image(
+                                supabase_url,
+                                publishable_key,
+                                product_path,
+                            )
+                        except Exception:
+                            pass
+                    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+                    raw_weight = str(metadata.get("weight_raw", ""))
+                    product_weight_value = item.get("product_weight")
+                    if product_weight_value is None:
+                        match = re.search(
+                            r"(?:^|; )PRODUCT_WEIGHT=([0-9]+(?:\.[0-9]+)?)",
+                            raw_weight,
+                        )
+                        product_weight_value = float(match.group(1)) if match else item.get("weight")
+                    core_weight_value = metadata.get("core_weight")
+                    if core_weight_value is None:
+                        tare_value = item.get("tare_weight")
+                        core_weight_value = tare_value if tare_value not in (None, 0, 0.0) else item.get("weight")
+                    items.append({
+                        "event_id": item.get("event_id", ""),
+                        "qr_code": item.get("qr_code", ""),
+                        "core_weight": core_weight_value,
+                        "product_weight": product_weight_value,
+                        "tare_weight": item.get("tare_weight"),
+                        "net_weight": item.get("net_weight"),
+                        "weight_raw": (
+                            f"PRODUCT_WEIGHT={product_weight_value}"
+                            if product_weight_value is not None
+                            else raw_weight
+                        ),
+                        "unit": item.get("unit", "kg"),
+                        "captured_at": item.get("captured_at", ""),
+                        "sync_status": "synced",
+                        "sync_error": None,
+                        "core_image_url": core_url,
+                        "product_image_url": product_url,
+                        "has_core_image": bool(core_url),
+                        "has_product_image": bool(product_url),
+                    })
+                self.send_json(200, {"ok": True, "source": "can_tu_dong", "items": items})
                 return
             if parsed.path == "/api/lookup":
                 qr_code = urllib.parse.parse_qs(parsed.query).get("qr", [""])[0]
@@ -1240,10 +1392,18 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     self.send_json(200, {"ok": True, "discarded": discarded})
                     return
                 frame = decode_image(str(payload.get("image", "")))
+                product_frame = (
+                    decode_image(str(payload.get("product_image", "")))
+                    if payload.get("product_image")
+                    else None
+                )
                 if self.path == "/api/decode":
                     self.send_json(200, service.decode_qr(frame))
                     return
                 if self.path == "/api/analyze":
+                    capture_kind = str(payload.get("capture_kind", "")).strip().lower()
+                    if capture_kind and capture_kind not in {"core", "product"}:
+                        raise ValueError("capture_kind phải là core hoặc product")
                     encoded_weight_frames = payload.get("weight_frames", [])
                     if not isinstance(encoded_weight_frames, list):
                         raise ValueError("weight_frames phải là danh sách")
@@ -1256,17 +1416,34 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         if not isinstance(encoded_frame, str):
                             raise ValueError("Burst chứa ảnh không hợp lệ")
                         weight_frames.append(decode_image(encoded_frame))
+                    bind_core = capture_kind != "product"
                     result = service.analyze(
                         frame,
                         str(payload.get("roi", "")),
                         str(payload.get("unit", "kg")),
-                        event_id=str(payload["event_id"]) if payload.get("event_id") else None,
-                        station_id=str(payload["station_id"]) if payload.get("station_id") else None,
-                        camera_id=str(payload["camera_id"]) if payload.get("camera_id") else None,
+                        event_id=str(payload["event_id"]) if bind_core and payload.get("event_id") else None,
+                        station_id=str(payload["station_id"]) if bind_core and payload.get("station_id") else None,
+                        camera_id=str(payload["camera_id"]) if bind_core and payload.get("camera_id") else None,
                         weight_frames=weight_frames,
                         require_temporal=bool(payload.get("camera_capture", False)),
                         recognition_profile=str(payload.get("recognition_profile", "fast")),
                     )
+                    if (
+                        capture_kind
+                        and result.get("weight_found")
+                        and result.get("quality_pass")
+                    ):
+                        staged = service.stage_evidence_step(
+                            frame,
+                            event_id=str(payload.get("event_id", "")),
+                            station_id=str(payload.get("station_id", "")),
+                            kind=capture_kind,
+                            weight=float(result["weight"]),
+                            unit=str(result.get("unit", payload.get("unit", "kg"))),
+                            qr_code=str(result.get("qr_code", "")),
+                        )
+                        result["step_saved"] = True
+                        result["step_image_path"] = staged["image_path"]
                     self.send_json(200, result)
                     return
                 if self.path == "/api/factory-sample":
@@ -1292,11 +1469,13 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         weight = float(payload.get("weight", ""))
                     except (TypeError, ValueError) as exc:
                         raise ValueError("Số cân không hợp lệ") from exc
-                    qr_frame = (
-                        decode_image(str(payload["qr_image"]))
-                        if payload.get("qr_image")
-                        else None
-                    )
+                    product_weight_value = payload.get("product_weight")
+                    if product_weight_value is None:
+                        product_match = re.search(
+                            r"(?:^|; )PRODUCT_WEIGHT=([0-9]+(?:\.[0-9]+)?)",
+                            str(payload.get("weight_raw", "")),
+                        )
+                        product_weight_value = product_match.group(1) if product_match else None
                     result = service.capture(
                         str(payload.get("qr_code", "")),
                         weight,
@@ -1304,6 +1483,10 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         frame,
                         bool(payload.get("vision_confirmed", False)),
                         str(payload.get("weight_raw", "")),
+                        product_frame=product_frame,
+                        product_weight=float(product_weight_value)
+                        if product_weight_value is not None
+                        else None,
                         event_id=str(payload["event_id"]) if payload.get("event_id") else None,
                         analysis_id=str(payload["analysis_id"])
                         if payload.get("analysis_id")
@@ -1316,10 +1499,6 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         else None,
                         frame_sha256=str(payload["frame_sha256"])
                         if payload.get("frame_sha256")
-                        else None,
-                        qr_frame=qr_frame,
-                        qr_frame_sha256=str(payload["qr_frame_sha256"])
-                        if payload.get("qr_frame_sha256")
                         else None,
                     )
                     self.send_json(201, result)
