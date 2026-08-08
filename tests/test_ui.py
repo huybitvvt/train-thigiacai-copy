@@ -719,11 +719,43 @@ def test_ui_uses_viet_nhat_red_black_roboto_branding() -> None:
     assert "fonts.googleapis.com" not in TEST_UI_HTML
 
 
-def test_ui_uses_full_width_single_column_capture_layout() -> None:
+def test_ui_uses_camera_left_params_right_capture_layout() -> None:
     assert "main{width:100%;margin:18px 0;padding:0 18px 24px;display:block}" in TEST_UI_HTML
-    assert "grid-template-columns:minmax(0,1fr) clamp(300px,22vw,360px)" not in TEST_UI_HTML
+    assert "grid-template-columns:minmax(460px,500px) minmax(0,1fr)" in TEST_UI_HTML
+    assert "aspect-ratio:1/1" in TEST_UI_HTML
+    assert "width:min(100%,480px)" in TEST_UI_HTML
+    assert 'class="capture-left"' in TEST_UI_HTML
+    assert 'class="capture-right"' in TEST_UI_HTML
     assert '<aside class="card lookup-card">' not in TEST_UI_HTML
     assert "main{width:100%" in TEST_UI_HTML
+
+
+def test_ui_has_shift_machine_production_order_fields() -> None:
+    assert 'id="sourceShift"' in TEST_UI_HTML
+    assert 'id="sourceMachine"' in TEST_UI_HTML
+    assert 'id="sourceOrder"' in TEST_UI_HTML
+    assert 'id="biWeight"' in TEST_UI_HTML
+    assert 'value="0.16"' in TEST_UI_HTML
+    assert "Lệnh sản xuất" in TEST_UI_HTML
+    assert "SOURCE_PRODUCTION_ORDER=" in TEST_UI_HTML
+    assert "BI_WEIGHT=" in TEST_UI_HTML
+    assert "production_order:sourceContext.order" in TEST_UI_HTML
+    from roll_qr_scale.test_ui import _merge_source_tags
+
+    merged = _merge_source_tags(
+        "PRODUCT_WEIGHT=1.2",
+        {
+            "work_date": "2026-08-08",
+            "shift": "HC1",
+            "machine": "Máy Bao Bì",
+            "production_order": "LSX-01",
+            "bi_weight": 0.16,
+        },
+    )
+    assert "SOURCE_SHIFT=HC1" in merged
+    assert "SOURCE_MACHINE=Máy Bao Bì" in merged
+    assert "SOURCE_PRODUCTION_ORDER=LSX-01" in merged
+    assert "BI_WEIGHT=0.16" in merged
 
 
 def test_product_capture_uses_detected_qr_as_product_code() -> None:
@@ -789,7 +821,9 @@ def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
         "data.event_id!==requestEventId",
         "event.key==='Enter'",
         "['1','2','3']",
-        "refreshCameraDevices(requestPermission=false)",
+        "refreshCameraDevices(true)",
+        "ensureCamerasForSelect()",
+        "ensureCameraPermission()",
         "session.stream!==stream||session.streamGeneration!==generation",
         "ĐỦ DỮ LIỆU · ",
         "prepareNextCapture('',session)",
@@ -798,7 +832,6 @@ def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
         "function completionReady(session)",
         "function productReady(session)",
         "ĐÃ CÂN LÕI · CHỜ CÂN SẢN PHẨM",
-        "ẢNH TL LÕI",
         'id="analyzeCoreBtn"',
         'id="analyzeProductBtn"',
         'id="productWeight"',

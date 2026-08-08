@@ -64,6 +64,179 @@ WEIGHT_ENGINES = {"local", "hybrid", "gemini"}
 GEMINI_RECOGNITION_PROFILES = {"fast", "accurate"}
 
 
+def _supabase_project_url() -> str:
+    configured = os.environ.get("ROLL_SCALE_SUPABASE_URL", "").strip().rstrip("/")
+    if configured:
+        return configured
+    api_url = os.environ.get("ROLL_SCALE_API_URL", "").strip()
+    marker = "/functions/v1/"
+    if marker in api_url:
+        return api_url.split(marker, 1)[0].rstrip("/")
+    return ""
+
+
+def _supabase_read_key() -> str:
+    return (
+        os.environ.get("ROLL_SCALE_SUPABASE_SERVICE_KEY", "").strip()
+        or os.environ.get("ROLL_SCALE_SUPABASE_PUBLISHABLE_KEY", "").strip()
+    )
+
+
+def _raw_tag(raw: str, name: str) -> str:
+    match = re.search(rf"(?:^|; )\s*{re.escape(name)}=([^;]+)", raw or "")
+    return match.group(1).strip() if match else ""
+
+
+def _item_work_date(captured_at: str, weight_raw: str = "") -> str:
+    tagged = _raw_tag(weight_raw, "SOURCE_DATE")
+    if tagged:
+        return tagged
+    text = str(captured_at or "")
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        return text[:10]
+    return ""
+
+
+def _matches_source_filters(
+    item: dict[str, object],
+    *,
+    work_date: str = "",
+    shift: str = "",
+    machine: str = "",
+    production_order: str = "",
+) -> bool:
+    raw = str(item.get("weight_raw") or "")
+    if work_date:
+        item_date = _item_work_date(str(item.get("captured_at") or ""), raw)
+        if item_date != work_date:
+            return False
+    if shift:
+        item_shift = _raw_tag(raw, "SOURCE_SHIFT")
+        if item_shift and item_shift != shift:
+            return False
+        if not item_shift:
+            # Legacy rows without source tags still show for the selected day.
+            pass
+    if machine:
+        item_machine = _raw_tag(raw, "SOURCE_MACHINE")
+        if item_machine and item_machine != machine:
+            return False
+    if production_order:
+        item_order = _raw_tag(raw, "SOURCE_PRODUCTION_ORDER")
+        if item_order and item_order != production_order:
+            return False
+    return True
+
+
+def _merge_source_tags(weight_raw: str, payload: dict[str, object]) -> str:
+    """Ensure Ca / Máy / Lệnh sản xuất tags are present for Supabase metadata."""
+
+    raw = str(weight_raw or "").strip()
+    extras: list[str] = []
+    mapping = (
+        ("work_date", "SOURCE_DATE"),
+        ("shift", "SOURCE_SHIFT"),
+        ("machine", "SOURCE_MACHINE"),
+        ("production_order", "SOURCE_PRODUCTION_ORDER"),
+    )
+    for field, tag in mapping:
+        value = re.sub(r"[;\r\n]+", " ", str(payload.get(field, "") or "")).strip()
+        if not value or _raw_tag(raw, tag):
+            continue
+        extras.append(f"{tag}={value[:80]}")
+    if not _raw_tag(raw, "BI_WEIGHT"):
+        bi_value = payload.get("bi_weight", payload.get("bi"))
+        try:
+            bi_number = float(bi_value) if bi_value is not None and bi_value != "" else 0.16
+        except (TypeError, ValueError):
+            bi_number = 0.16
+        if bi_number < 0:
+            bi_number = 0.16
+        extras.append(f"BI_WEIGHT={bi_number:g}")
+    if not extras:
+        return raw
+    prefix = "; ".join(extras)
+    return f"{prefix}; {raw}" if raw else prefix
+
+
+def _persistable_weight_raw(
+    weight_raw: str,
+    *,
+    weight: float,
+    vision_confirmed: bool,
+) -> str:
+    raw = str(weight_raw or "").strip()
+    if not vision_confirmed:
+        if not raw.startswith("MANUAL:"):
+            raw = f"MANUAL:{weight}" + (f"; {raw}" if raw else "")
+    return raw[:1000]
+
+
+def _local_measurement_items(
+    store: MeasurementStore,
+    limit: int,
+    *,
+    work_date: str = "",
+    shift: str = "",
+    machine: str = "",
+    production_order: str = "",
+) -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    for item in store.recent(max(limit, 200)):
+        product_weight = item.product_weight
+        if product_weight is None:
+            match = re.search(
+                r"(?:^|; )PRODUCT_WEIGHT=([0-9]+(?:\.[0-9]+)?)",
+                item.weight_raw or "",
+            )
+            product_weight = float(match.group(1)) if match else None
+        has_core = bool(item.image_path and Path(item.image_path).is_file())
+        has_product = bool(
+            item.product_image_path and Path(item.product_image_path).is_file()
+        )
+        core_url = (
+            f"/api/measurement-image?event_id={urllib.parse.quote(item.event_id)}&kind=core"
+            if has_core
+            else item.remote_image_url
+        )
+        product_url = (
+            f"/api/measurement-image?event_id={urllib.parse.quote(item.event_id)}&kind=product"
+            if has_product
+            else None
+        )
+        payload = {
+            "event_id": item.event_id,
+            "qr_code": item.qr_code,
+            "core_weight": item.weight,
+            "product_weight": product_weight,
+            "weight_raw": item.weight_raw
+            or (
+                f"PRODUCT_WEIGHT={product_weight}"
+                if product_weight is not None
+                else ""
+            ),
+            "unit": item.unit,
+            "captured_at": item.captured_at,
+            "sync_status": item.sync_status,
+            "sync_error": item.sync_error,
+            "core_image_url": core_url,
+            "product_image_url": product_url,
+            "has_core_image": bool(core_url),
+            "has_product_image": bool(product_url),
+        }
+        if _matches_source_filters(
+            payload,
+            work_date=work_date,
+            shift=shift,
+            machine=machine,
+            production_order=production_order,
+        ):
+            items.append(payload)
+        if len(items) >= limit:
+            break
+    return items
+
+
 def _env_flag(name: str, default: bool = False) -> bool:
     value = os.environ.get(name)
     if value is None:
@@ -805,7 +978,11 @@ class StationUIService:
                 ),
                 needs_sync=self.sync_worker is not None,
                 qr_source=qr_source,
-                weight_raw=weight_raw[:500] if vision_confirmed else f"MANUAL:{weight}",
+                weight_raw=_persistable_weight_raw(
+                    weight_raw,
+                    weight=weight,
+                    vision_confirmed=vision_confirmed,
+                ),
                 weight_stable=True,
                 event_id=event_id,
                 captured_at=captured_at,
@@ -1296,26 +1473,66 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                 )
                 return
             if parsed.path == "/api/measurements":
+                query = urllib.parse.parse_qs(parsed.query)
                 try:
-                    limit = int(urllib.parse.parse_qs(parsed.query).get("limit", ["50"])[0])
+                    limit = int(query.get("limit", ["50"])[0])
                 except ValueError:
                     limit = 50
-                supabase_url = os.environ.get("ROLL_SCALE_SUPABASE_URL", "").strip()
-                publishable_key = (
-                    os.environ.get("ROLL_SCALE_SUPABASE_SERVICE_KEY", "").strip()
-                    or os.environ.get("ROLL_SCALE_SUPABASE_PUBLISHABLE_KEY", "").strip()
-                )
+                work_date = str(query.get("work_date", [""])[0]).strip()
+                shift = str(query.get("shift", [""])[0]).strip()
+                machine = str(query.get("machine", [""])[0]).strip()
+                production_order = str(query.get("production_order", [""])[0]).strip()
+                supabase_url = _supabase_project_url()
+                publishable_key = _supabase_read_key()
                 if not supabase_url or not publishable_key:
-                    self.send_json(503, {"ok": False, "error": "supabase_not_configured"})
+                    self.send_json(
+                        200,
+                        {
+                            "ok": True,
+                            "source": "local",
+                            "work_date": work_date,
+                            "shift": shift,
+                            "machine": machine,
+                            "production_order": production_order,
+                            "items": _local_measurement_items(
+                                store,
+                                limit,
+                                work_date=work_date,
+                                shift=shift,
+                                machine=machine,
+                                production_order=production_order,
+                            ),
+                        },
+                    )
                     return
                 try:
                     remote_items = fetch_supabase_table(
                         supabase_url,
                         publishable_key,
-                        limit=limit,
+                        limit=max(limit, 200),
                     )
                 except Exception as exc:
-                    self.send_json(502, {"ok": False, "error": "supabase_list_failed", "message": str(exc)})
+                    # Keep the operator UI usable when REST keys are missing/wrong.
+                    self.send_json(
+                        200,
+                        {
+                            "ok": True,
+                            "source": "local",
+                            "fallback_error": str(exc),
+                            "work_date": work_date,
+                            "shift": shift,
+                            "machine": machine,
+                            "production_order": production_order,
+                            "items": _local_measurement_items(
+                                store,
+                                limit,
+                                work_date=work_date,
+                                shift=shift,
+                                machine=machine,
+                                production_order=production_order,
+                            ),
+                        },
+                    )
                     return
                 items = []
                 for item in remote_items:
@@ -1344,7 +1561,7 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     if core_weight_value is None:
                         tare_value = item.get("tare_weight")
                         core_weight_value = tare_value if tare_value not in (None, 0, 0.0) else item.get("weight")
-                    items.append({
+                    payload = {
                         "event_id": item.get("event_id", ""),
                         "qr_code": item.get("qr_code", ""),
                         "core_weight": core_weight_value,
@@ -1352,9 +1569,13 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         "tare_weight": item.get("tare_weight"),
                         "net_weight": item.get("net_weight"),
                         "weight_raw": (
-                            f"PRODUCT_WEIGHT={product_weight_value}"
-                            if product_weight_value is not None
-                            else raw_weight
+                            raw_weight
+                            if raw_weight
+                            else (
+                                f"PRODUCT_WEIGHT={product_weight_value}"
+                                if product_weight_value is not None
+                                else ""
+                            )
                         ),
                         "unit": item.get("unit", "kg"),
                         "captured_at": item.get("captured_at", ""),
@@ -1364,8 +1585,29 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         "product_image_url": product_url,
                         "has_core_image": bool(core_url),
                         "has_product_image": bool(product_url),
-                    })
-                self.send_json(200, {"ok": True, "source": "can_tu_dong", "items": items})
+                    }
+                    if _matches_source_filters(
+                        payload,
+                        work_date=work_date,
+                        shift=shift,
+                        machine=machine,
+                        production_order=production_order,
+                    ):
+                        items.append(payload)
+                    if len(items) >= limit:
+                        break
+                self.send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "source": "can_tu_dong",
+                        "work_date": work_date,
+                        "shift": shift,
+                        "machine": machine,
+                        "production_order": production_order,
+                        "items": items,
+                    },
+                )
                 return
             if parsed.path == "/api/lookup":
                 qr_code = urllib.parse.parse_qs(parsed.query).get("qr", [""])[0]
@@ -1469,11 +1711,14 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         weight = float(payload.get("weight", ""))
                     except (TypeError, ValueError) as exc:
                         raise ValueError("Số cân không hợp lệ") from exc
+                    weight_raw = _merge_source_tags(str(payload.get("weight_raw", "")), payload)
+                    if not _raw_tag(weight_raw, "SOURCE_PRODUCTION_ORDER"):
+                        raise ValueError("Thiếu Lệnh sản xuất")
                     product_weight_value = payload.get("product_weight")
                     if product_weight_value is None:
                         product_match = re.search(
                             r"(?:^|; )PRODUCT_WEIGHT=([0-9]+(?:\.[0-9]+)?)",
-                            str(payload.get("weight_raw", "")),
+                            weight_raw,
                         )
                         product_weight_value = product_match.group(1) if product_match else None
                     result = service.capture(
@@ -1482,7 +1727,7 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         str(payload.get("unit", "kg")),
                         frame,
                         bool(payload.get("vision_confirmed", False)),
-                        str(payload.get("weight_raw", "")),
+                        weight_raw,
                         product_frame=product_frame,
                         product_weight=float(product_weight_value)
                         if product_weight_value is not None

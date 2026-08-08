@@ -358,7 +358,7 @@ class MeasurementStore:
         captured_at = captured_at or datetime.now(timezone.utc).isoformat(
             timespec="milliseconds"
         )
-        weight_raw = weight_raw[:500]
+        weight_raw = weight_raw[:1000]
 
         encoded_ok, encoded_frame = cv2.imencode(".jpg", frame)
         if not encoded_ok:

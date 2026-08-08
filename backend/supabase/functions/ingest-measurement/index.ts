@@ -220,8 +220,21 @@ Deno.serve(async (request: Request) => {
     ? body.weight_source.slice(0, 100)
     : "unknown";
   const qrSource = typeof body.qr_source === "string" ? body.qr_source.slice(0, 100) : "unknown";
-  const weightRaw = typeof body.weight_raw === "string" ? body.weight_raw.slice(0, 500) : "";
+  const weightRaw = typeof body.weight_raw === "string" ? body.weight_raw.slice(0, 1000) : "";
   const weightStable = body.weight_stable === true;
+  const sourceTag = (name: string): string => {
+    const match = weightRaw.match(new RegExp(`(?:^|; )\\s*${name}=([^;]+)`));
+    return match ? match[1].trim().slice(0, 80) : "";
+  };
+  const workDate = sourceTag("SOURCE_DATE");
+  const shift = sourceTag("SOURCE_SHIFT");
+  const machine = sourceTag("SOURCE_MACHINE");
+  const productionOrder = sourceTag("SOURCE_PRODUCTION_ORDER");
+  const biWeightRaw = sourceTag("BI_WEIGHT");
+  const biWeightParsed = Number(biWeightRaw);
+  const biWeight = Number.isFinite(biWeightParsed) && biWeightParsed >= 0
+    ? biWeightParsed
+    : 0.16;
 
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(eventId)) {
     return json(422, { ok: false, error: "invalid_event_id" });
@@ -498,6 +511,11 @@ Deno.serve(async (request: Request) => {
         weight_stable: weightStable,
         core_weight: weight,
         product_weight: productWeight,
+        work_date: workDate || null,
+        shift: shift || null,
+        machine: machine || null,
+        production_order: productionOrder || null,
+        bi_weight: biWeight,
       },
     })
     .select("id,image_path")
