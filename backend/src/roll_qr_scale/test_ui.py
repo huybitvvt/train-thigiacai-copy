@@ -694,6 +694,8 @@ class StationUIService:
         gemini_output_tokens: int | None = None
         gemini_thinking_tokens: int | None = None
         gemini_total_tokens: int | None = None
+        gemini_attempts = 0
+        gemini_fallback_used = False
         requires_human_review = False
         if self.weight_engine == "gemini":
             selected_gemini_reader = self._gemini_reader_for(recognition_profile)
@@ -711,12 +713,36 @@ class StationUIService:
                 recognition_source = "none"
             else:
                 suggestion = selected_gemini_reader.read(gemini_frames, unit=unit)
+                gemini_attempts = 1
+                suggestion_raw = suggestion.raw
+                suggestions = [suggestion]
+                crop_was_used = bool(
+                    capture_kind in {"core", "product"} and roi is not None
+                )
+                # Keep the normal path fast. Retry the original full frame only
+                # when Gemini returned a valid response but could not read the
+                # focused LED crop. Network/API errors are not retried here.
+                if (
+                    crop_was_used
+                    and suggestion.value is None
+                    and not suggestion.raw.startswith("GEMINI ERROR:")
+                ):
+                    fallback = selected_gemini_reader.read(frames, unit=unit)
+                    suggestions.append(fallback)
+                    gemini_attempts = 2
+                    gemini_fallback_used = True
+                    suggestion_raw = (
+                        f"CROP ATTEMPT: {suggestion.raw}; "
+                        f"FULL FRAME RETRY: {fallback.raw}"
+                    )
+                    suggestion = fallback
+                    roi_method = f"{roi_method}+full-frame-retry"
                 gemini_suggestion = suggestion.value
-                gemini_latency_seconds = suggestion.latency_seconds
-                gemini_input_tokens = suggestion.input_tokens
-                gemini_output_tokens = suggestion.output_tokens
-                gemini_thinking_tokens = suggestion.thinking_tokens
-                gemini_total_tokens = suggestion.total_tokens
+                gemini_latency_seconds = sum(item.latency_seconds for item in suggestions)
+                gemini_input_tokens = sum(item.input_tokens for item in suggestions)
+                gemini_output_tokens = sum(item.output_tokens for item in suggestions)
+                gemini_thinking_tokens = sum(item.thinking_tokens for item in suggestions)
+                gemini_total_tokens = sum(item.total_tokens for item in suggestions)
                 local_qr = str(decoded.get("qr_code") or "").strip()
                 gemini_qr = str(suggestion.qr_code or "").strip()
                 qr_note = ""
@@ -743,7 +769,7 @@ class StationUIService:
                         None,
                         unit,
                         False,
-                        f"{suggestion.raw}{qr_note}; GEMINI PRIMARY: rejected",
+                        f"{suggestion_raw}{qr_note}; GEMINI PRIMARY: rejected",
                     )
                     recognition_source = "none"
                 else:
@@ -752,9 +778,9 @@ class StationUIService:
                         suggestion.unit,
                         True,
                         (
-                            f"{suggestion.raw}{qr_note}; GEMINI PRIMARY: single full-image accepted"
+                            f"{suggestion_raw}{qr_note}; GEMINI PRIMARY: single full-image accepted"
                             if single_image_request
-                            else f"{suggestion.raw}{qr_note}; GEMINI PRIMARY: 3-frame schema accepted"
+                            else f"{suggestion_raw}{qr_note}; GEMINI PRIMARY: 3-frame schema accepted"
                         ),
                     )
                     recognition_source = "gemini-primary"
@@ -852,6 +878,8 @@ class StationUIService:
             "gemini_output_tokens": gemini_output_tokens,
             "gemini_thinking_tokens": gemini_thinking_tokens,
             "gemini_total_tokens": gemini_total_tokens,
+            "gemini_attempts": gemini_attempts,
+            "gemini_fallback_used": gemini_fallback_used,
             "requires_human_review": requires_human_review,
             "roi": self._roi_text(roi) if roi is not None else None,
             "roi_method": roi_method,

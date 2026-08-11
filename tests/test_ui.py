@@ -666,7 +666,139 @@ def test_render_capture_crops_detected_led_before_gemini(tmp_path, monkeypatch) 
     store.close()
     assert result["weight"] == pytest.approx(13.04)
     assert result["gemini_crop_applied"] is True
+    assert result["gemini_attempts"] == 1
+    assert result["gemini_fallback_used"] is False
     assert result["roi_method"] == "gemini-crop-red-led"
+
+
+def test_unreadable_gemini_crop_retries_one_full_frame(tmp_path, monkeypatch) -> None:
+    class FakeGeminiReader:
+        def __init__(self):
+            self.shapes = []
+
+        def read(self, frames, *, unit):
+            self.shapes.append(frames[0].shape[:2])
+            if len(self.shapes) == 1:
+                return GeminiWeightSuggestion(
+                    None,
+                    unit,
+                    False,
+                    True,
+                    "GEMINI_FULL:weight-unreadable",
+                    0.2,
+                    input_tokens=100,
+                    output_tokens=10,
+                    total_tokens=110,
+                )
+            return GeminiWeightSuggestion(
+                13.04,
+                unit,
+                True,
+                True,
+                "GEMINI_FULL:13.04",
+                0.3,
+                input_tokens=200,
+                output_tokens=20,
+                total_tokens=220,
+            )
+
+        def status(self):
+            return {"enabled": True}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        test_ui_module,
+        "detect_weight_roi",
+        lambda frame: (NormalizedROI(0.4, 0.7, 0.6, 0.8), "red-led"),
+    )
+    reader = FakeGeminiReader()
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(
+        store,
+        None,
+        None,
+        None,
+        gemini_reader=reader,
+        weight_engine="gemini",
+    )
+
+    result = service.analyze(
+        np.full((600, 800, 3), 180, dtype=np.uint8),
+        "auto",
+        "kg",
+        capture_kind="core",
+    )
+
+    service.close()
+    store.close()
+    assert reader.shapes[0][0] < 200
+    assert reader.shapes[0][1] < 300
+    assert reader.shapes[1] == (600, 800)
+    assert result["weight"] == pytest.approx(13.04)
+    assert result["gemini_attempts"] == 2
+    assert result["gemini_fallback_used"] is True
+    assert result["gemini_latency_seconds"] == pytest.approx(0.5)
+    assert result["gemini_input_tokens"] == 300
+    assert result["gemini_output_tokens"] == 30
+    assert result["gemini_total_tokens"] == 330
+    assert result["roi_method"] == "gemini-crop-red-led+full-frame-retry"
+    assert "CROP ATTEMPT" in result["weight_raw"]
+    assert "FULL FRAME RETRY" in result["weight_raw"]
+
+
+def test_gemini_crop_does_not_retry_network_error(tmp_path, monkeypatch) -> None:
+    class FakeGeminiReader:
+        def __init__(self):
+            self.calls = 0
+
+        def read(self, frames, *, unit):
+            self.calls += 1
+            return GeminiWeightSuggestion(
+                None,
+                unit,
+                False,
+                False,
+                "GEMINI ERROR: timeout",
+                10.0,
+            )
+
+        def status(self):
+            return {"enabled": True}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        test_ui_module,
+        "detect_weight_roi",
+        lambda frame: (NormalizedROI(0.4, 0.7, 0.6, 0.8), "red-led"),
+    )
+    reader = FakeGeminiReader()
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(
+        store,
+        None,
+        None,
+        None,
+        gemini_reader=reader,
+        weight_engine="gemini",
+    )
+
+    result = service.analyze(
+        np.full((600, 800, 3), 180, dtype=np.uint8),
+        "auto",
+        "kg",
+        capture_kind="core",
+    )
+
+    service.close()
+    store.close()
+    assert reader.calls == 1
+    assert result["weight_found"] is False
+    assert result["gemini_attempts"] == 1
+    assert result["gemini_fallback_used"] is False
 
 
 def test_browser_qr_is_accepted_but_decoder_conflict_requires_manual_code(tmp_path) -> None:

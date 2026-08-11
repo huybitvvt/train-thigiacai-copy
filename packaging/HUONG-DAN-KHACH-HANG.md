@@ -65,7 +65,8 @@ lượt là 10 giây và 30 giây.
 
 Bản pilot dùng đúng một camera nhưng để Gemini đọc trực tiếp thì đổi
 `ROLL_SCALE_WEIGHT_ENGINE=gemini`. Paddle không khởi tạo. Gemini chỉ đọc số
-cân từ vùng LED đã crop, không suy đoán mã SP. Ở lần chụp cân sản phẩm, mã QR
+cân từ vùng LED đã crop, không suy đoán mã SP. Nếu crop không đọc được, backend
+thử lại ảnh toàn khung đúng một lần; lỗi mạng/timeout không bị gọi lặp. Ở lần chụp cân sản phẩm, mã QR
 được trình duyệt và ZXing backend đọc độc lập. Hai bộ giải mã khớp thì tự điền;
 nếu xung đột thì hệ thống để trống và yêu cầu người vận hành kiểm tra.
 

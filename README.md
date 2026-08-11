@@ -242,7 +242,7 @@ Thao tác mỗi lần cân:
 3. Kiểm tra mã, số cân và độ tin cậy trên cửa sổ.
 4. Đúng thì nhấn `Enter` để lưu; sai thì chỉnh vị trí/ánh sáng và nhấn `Space` chụp lại.
 
-Camera có thể mở cả ca, nhưng YOLO/PaddleOCR không chạy liên tục. Chế độ `local`/`hybrid` chỉ lấy burst khi bấm chụp; mặc định chụp 5 frame rồi chọn đúng 3 frame đầu–giữa–cuối. Chế độ `gemini` gửi một ảnh JPEG đã nén cho mỗi lần chụp; backend dùng ROI cấu hình hoặc tự dò LED để crop trước khi gọi Gemini. Chế độ CLI `roll-qr-scale` vẫn đọc một ảnh như trước.
+Camera có thể mở cả ca, nhưng YOLO/PaddleOCR không chạy liên tục. Chế độ `local`/`hybrid` chỉ lấy burst khi bấm chụp; mặc định chụp 5 frame rồi chọn đúng 3 frame đầu–giữa–cuối. Chế độ `gemini` gửi một ảnh JPEG đã nén cho mỗi lần chụp; backend dùng ROI cấu hình hoặc tự dò LED để crop trước khi gọi Gemini. Nếu Gemini trả kết quả hợp lệ nhưng không đọc được crop, backend thử lại toàn khung đúng một lần; lỗi mạng/timeout không bị gọi lặp. Chế độ CLI `roll-qr-scale` vẫn đọc một ảnh như trước.
 
 ### Gemini fallback tùy chọn
 
