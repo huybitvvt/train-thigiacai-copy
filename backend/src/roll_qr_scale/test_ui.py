@@ -436,6 +436,19 @@ class StationUIService:
             return ""
         return f"{roi.x1:.4f},{roi.y1:.4f},{roi.x2:.4f},{roi.y2:.4f}"
 
+    @staticmethod
+    def _gemini_crop(frame: np.ndarray, roi: NormalizedROI) -> np.ndarray:
+        left, top, right, bottom = roi.pixels(frame)
+        width = max(1, right - left)
+        height = max(1, bottom - top)
+        pad_x = max(4, round(width * 0.12))
+        pad_y = max(4, round(height * 0.18))
+        frame_height, frame_width = frame.shape[:2]
+        return frame[
+            max(0, top - pad_y) : min(frame_height, bottom + pad_y),
+            max(0, left - pad_x) : min(frame_width, right + pad_x),
+        ]
+
     def status(self) -> dict[str, object]:
         station_states = {item["station_id"]: item for item in self.sessions.statuses()}
         stations: list[dict[str, object]] = []
@@ -579,22 +592,62 @@ class StationUIService:
         weight_frames: list[np.ndarray] | None = None,
         roi_method_override: str | None = None,
         recognition_profile: str = "fast",
+        capture_kind: str = "",
+        client_qr_code: str = "",
     ) -> dict[str, object]:
         if unit not in UNITS:
             raise ValueError("Đơn vị không hợp lệ")
         if recognition_profile not in GEMINI_RECOGNITION_PROFILES:
             raise ValueError("Chế độ nhận diện phải là fast hoặc accurate")
+        if capture_kind not in {"", "core", "product"}:
+            raise ValueError("capture_kind phải là core hoặc product")
         quality = self.assess_quality(frame)
         quality_payload, quality_pass = self.quality_result(quality)
         decoded = self._decode_qr(frame)
+        client_qr = client_qr_code.strip()
+        if len(client_qr) > 512 or any(ord(character) < 32 for character in client_qr):
+            raise ValueError("Mã QR từ trình duyệt không hợp lệ")
+        qr_conflict = False
+        if client_qr:
+            local_qr = str(decoded.get("qr_code") or "").strip()
+            if local_qr and local_qr != client_qr:
+                qr_conflict = True
+                decoded = {
+                    "ok": True,
+                    "found": False,
+                    "qr_code": None,
+                    "decoder": "dedicated-decoder-conflict",
+                    "qr_roi": decoded.get("qr_roi"),
+                }
+            elif local_qr:
+                decoded["decoder"] = f"{decoded.get('decoder', 'local')}+browser-confirmed"
+            else:
+                decoded = {
+                    "ok": True,
+                    "found": True,
+                    "qr_code": client_qr,
+                    "decoder": "browser-barcode-detector",
+                    "qr_roi": None,
+                }
         frames = [frame, *(weight_frames or [])]
         auto_roi = roi_text.strip().lower() in {"", "auto"}
         roi: NormalizedROI | None
         if self.weight_engine == "gemini":
-            # Gemini primary receives full frames. ROI detection must never
-            # block or misdirect cloud recognition; the yellow box is hidden.
-            roi = None
-            roi_method = "gemini-full-frame"
+            optimized_capture = capture_kind in {"core", "product"}
+            if not optimized_capture:
+                roi = None
+                roi_method = "gemini-full-frame"
+            elif auto_roi:
+                located = detect_weight_roi(frame)
+                if located is None:
+                    roi = None
+                    roi_method = "gemini-full-frame-fallback"
+                else:
+                    roi, detected_method = located
+                    roi_method = f"gemini-crop-{detected_method}"
+            else:
+                roi = parse_normalized_roi(roi_text)
+                roi_method = roi_method_override or "gemini-crop-manual"
         elif auto_roi:
             located = (
                 detect_weight_roi_consensus(frames)
@@ -646,6 +699,8 @@ class StationUIService:
             selected_gemini_reader = self._gemini_reader_for(recognition_profile)
             single_image_request = len(frames) == 1
             gemini_frames = [frame] if single_image_request else frames
+            if capture_kind in {"core", "product"} and roi is not None:
+                gemini_frames = [self._gemini_crop(item, roi) for item in gemini_frames]
             if len(gemini_frames) == 2:
                 reading = WeightReading(
                     None,
@@ -665,7 +720,9 @@ class StationUIService:
                 local_qr = str(decoded.get("qr_code") or "").strip()
                 gemini_qr = str(suggestion.qr_code or "").strip()
                 qr_note = ""
-                if local_qr and gemini_qr and local_qr != gemini_qr:
+                if qr_conflict:
+                    qr_note = "; QR: browser/backend conflict; manual code required"
+                elif local_qr and gemini_qr and local_qr != gemini_qr:
                     qr_note = "; QR: local/Gemini conflict; kept checksum-validated local QR"
                     decoded["decoder"] = (
                         f"{decoded.get('decoder', 'local')}+gemini-conflict-local-kept"
@@ -775,6 +832,7 @@ class StationUIService:
             "qr_code": decoded.get("qr_code"),
             "qr_decoder": decoded.get("decoder"),
             "qr_roi": decoded.get("qr_roi"),
+            "qr_conflict": qr_conflict,
             "weight_found": reading.value is not None,
             "weight": reading.value,
             "unit": reading.unit,
@@ -797,6 +855,11 @@ class StationUIService:
             "requires_human_review": requires_human_review,
             "roi": self._roi_text(roi) if roi is not None else None,
             "roi_method": roi_method,
+            "gemini_crop_applied": bool(
+                self.weight_engine == "gemini"
+                and capture_kind in {"core", "product"}
+                and roi is not None
+            ),
             "burst_frames": len(frames),
             "quality": quality_payload,
             "quality_pass": quality_pass,
@@ -814,6 +877,9 @@ class StationUIService:
         weight_frames: list[np.ndarray] | None = None,
         require_temporal: bool = False,
         recognition_profile: str = "fast",
+        capture_kind: str = "",
+        client_qr_code: str = "",
+        context_station_id: str | None = None,
     ) -> dict[str, object]:
         additional_frames = list(weight_frames or [])
         if len(additional_frames) >= MAX_BURST_FRAMES:
@@ -833,7 +899,7 @@ class StationUIService:
         ):
             raise ValueError("Camera không lấy đủ tối thiểu 3 frame LED; hãy chụp lại")
         identities = (event_id, station_id, camera_id)
-        configured_roi = self.weight_rois.get(station_id or "")
+        configured_roi = self.weight_rois.get(context_station_id or station_id or "")
         if configured_roi is None and not any(identities) and self.station_count == 1:
             configured_roi = self.weight_rois.get(str(self.station_configs[0]["station_id"]))
         roi_method_override = None
@@ -849,6 +915,8 @@ class StationUIService:
                 additional_frames,
                 roi_method_override,
                 recognition_profile,
+                capture_kind,
+                client_qr_code,
             )
         if not all(identities):
             raise ValueError("Cần đủ event_id, station_id và camera_id")
@@ -869,6 +937,8 @@ class StationUIService:
                 additional_frames,
                 roi_method_override,
                 recognition_profile,
+                capture_kind,
+                client_qr_code,
             )
             binding = self.sessions.mark_ready(binding.analysis_id)
         except Exception as exc:
@@ -1301,12 +1371,20 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
             model=args.gemini_model,
             timeout_seconds=args.gemini_timeout,
             thinking_level="minimal",
+            max_image_edge=1280,
+            jpeg_quality=86,
+            media_resolution="medium",
+            include_qr=False,
         )
         gemini_accurate_reader = GeminiWeightReader(
             gemini_api_key,
             model=args.gemini_accurate_model,
             timeout_seconds=args.gemini_accurate_timeout,
             thinking_level="medium",
+            max_image_edge=1600,
+            jpeg_quality=90,
+            media_resolution="high",
+            include_qr=False,
         )
     store = MeasurementStore(args.db, args.captures)
     worker = None
@@ -1669,6 +1747,9 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         weight_frames=weight_frames,
                         require_temporal=bool(payload.get("camera_capture", False)),
                         recognition_profile=str(payload.get("recognition_profile", "fast")),
+                        capture_kind=capture_kind,
+                        client_qr_code=str(payload.get("client_qr_code", "")),
+                        context_station_id=str(payload.get("station_id", "")) or None,
                     )
                     if (
                         capture_kind

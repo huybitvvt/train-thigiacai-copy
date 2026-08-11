@@ -113,29 +113,62 @@ class QRReader:
         try:
             import zxingcpp
 
-            barcodes = zxingcpp.read_barcodes(
-                image,
-                formats=zxingcpp.BarcodeFormat.QRCode,
-                try_rotate=True,
-                try_downscale=True,
-                try_invert=True,
+            gray = (
+                cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+                if image.ndim == 3
+                else np.asarray(image, dtype=np.uint8)
             )
-            for barcode in barcodes:
-                value = barcode.text.strip()
-                if not value:
-                    continue
-                position = barcode.position
-                corners = np.array(
-                    [
-                        [position.top_left.x, position.top_left.y],
-                        [position.top_right.x, position.top_right.y],
-                        [position.bottom_right.x, position.bottom_right.y],
-                        [position.bottom_left.x, position.bottom_left.y],
-                    ],
-                    dtype=np.float32,
+            variants = ((gray, "zxing"),)
+            for candidate, decoder in variants:
+                barcodes = zxingcpp.read_barcodes(
+                    candidate,
+                    formats=zxingcpp.BarcodeFormat.QRCode,
+                    try_rotate=True,
+                    try_downscale=True,
+                    try_invert=True,
                 )
-                found.append(QRDetection(value, corners, "zxing"))
-        except (ImportError, RuntimeError, ValueError):
+                for barcode in barcodes:
+                    value = barcode.text.strip()
+                    if not value:
+                        continue
+                    position = barcode.position
+                    corners = np.array(
+                        [
+                            [position.top_left.x, position.top_left.y],
+                            [position.top_right.x, position.top_right.y],
+                            [position.bottom_right.x, position.bottom_right.y],
+                            [position.bottom_left.x, position.bottom_left.y],
+                        ],
+                        dtype=np.float32,
+                    )
+                    found.append(QRDetection(value, corners, decoder))
+                if found:
+                    break
+            if not found:
+                enhanced = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8)).apply(gray)
+                barcodes = zxingcpp.read_barcodes(
+                    enhanced,
+                    formats=zxingcpp.BarcodeFormat.QRCode,
+                    try_rotate=True,
+                    try_downscale=True,
+                    try_invert=True,
+                )
+                for barcode in barcodes:
+                    value = barcode.text.strip()
+                    if not value:
+                        continue
+                    position = barcode.position
+                    corners = np.array(
+                        [
+                            [position.top_left.x, position.top_left.y],
+                            [position.top_right.x, position.top_right.y],
+                            [position.bottom_right.x, position.bottom_right.y],
+                            [position.bottom_left.x, position.bottom_left.y],
+                        ],
+                        dtype=np.float32,
+                    )
+                    found.append(QRDetection(value, corners, "zxing-clahe"))
+        except (ImportError, RuntimeError, TypeError, ValueError):
             # OpenCV remains available when a ZXing wheel is unavailable.
             pass
 

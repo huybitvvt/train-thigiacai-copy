@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import cv2
 import numpy as np
 import pytest
 
@@ -138,3 +139,33 @@ def test_gemini_reader_redacts_api_key_from_errors() -> None:
     assert result.value is None
     assert "secret-key" not in result.raw
     assert "[redacted]" in result.raw
+
+
+def test_fast_reader_limits_image_size_and_does_not_trust_ai_qr() -> None:
+    client = FakeClient({
+        "weight_readable": True,
+        "weight_digits": "1304",
+        "qr_readable": True,
+        "qr_code": "HALLUCINATED-CODE",
+        "all_frames_agree": True,
+    })
+    reader = GeminiWeightReader(
+        "secret-key",
+        client=client,
+        max_image_edge=640,
+        jpeg_quality=80,
+        media_resolution="medium",
+        include_qr=False,
+    )
+
+    result = reader.read([np.zeros((1080, 1920, 3), dtype=np.uint8)])
+
+    image_part = client.models.calls[0]["contents"][1]
+    encoded = np.frombuffer(image_part.inline_data.data, dtype=np.uint8)
+    decoded = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+    assert max(decoded.shape[:2]) == 640
+    assert result.value == pytest.approx(13.04)
+    assert result.qr_code is None
+    assert result.qr_readable is False
+    assert reader.status()["media_resolution"] == "medium"
+    assert reader.status()["include_qr"] is False

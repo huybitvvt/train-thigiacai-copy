@@ -2,7 +2,6 @@ services:
   - type: web
     name: tram-can-qr-pilot
     runtime: python
-    plan: free
     region: singapore
     autoDeploy: true
     buildCommand: pip install -r backend/requirements-render.txt

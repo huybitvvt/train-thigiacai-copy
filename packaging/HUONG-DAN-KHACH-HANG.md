@@ -34,8 +34,8 @@ thẻ trạm rồi bấm **Mở camera đã gán**. Trình duyệt lưu ánh x�
 máy khách.
 
 Với `local`/`hybrid`, mặc định mỗi lần chụp dùng 5 frame và PaddleOCR chọn 3
-frame đầu–giữa–cuối. Với `gemini`, mỗi lần nhấn `Space` chỉ chụp và gửi đúng
-một ảnh đầy đủ. Có thể giữ cấu hình:
+frame đầu–giữa–cuối. Với `gemini`, mỗi lần chụp gửi một ảnh bằng chứng đã nén;
+backend crop vùng LED trước khi gọi Gemini. Có thể giữ cấu hình:
 
 ```text
 ROLL_SCALE_WEIGHT_BURST_FRAMES=5
@@ -54,25 +54,24 @@ ROLL_SCALE_GEMINI_TIMEOUT=10.0
 ROLL_SCALE_GEMINI_ACCURATE_TIMEOUT=30.0
 ```
 
-Gemini chỉ xác nhận ứng viên đa số từ PaddleOCR; kết quả cloud đơn lẻ hoặc
-khác local luôn bị giữ lại để người vận hành kiểm tra.
+Ở chế độ `hybrid`, Gemini chỉ xác nhận ứng viên đa số từ PaddleOCR; kết quả
+cloud đơn lẻ hoặc khác local luôn bị giữ lại để người vận hành kiểm tra.
 
 Trên giao diện, chọn **Nhanh** để dùng `gemini-3.5-flash-lite` với thinking
 tối thiểu; chọn **Chính xác** để dùng `gemini-3.1-pro-preview` với thinking
 trung bình. Model Pro không có Free Tier trên Gemini API và cần bật billing.
-Mỗi lần nhấn `Space` ở cả hai chế độ vẫn chỉ gửi đúng một ảnh. Timeout mặc định
-lần lượt là 10 giây và 20 giây.
+Mỗi lần chụp ở cả hai chế độ vẫn chỉ gửi đúng một ảnh. Timeout mặc định lần
+lượt là 10 giây và 30 giây.
 
 Bản pilot dùng đúng một camera nhưng để Gemini đọc trực tiếp thì đổi
-`ROLL_SCALE_WEIGHT_ENGINE=gemini`. Paddle không khởi tạo. Mỗi lần nhấn `Space`
-hoặc chọn tệp, đúng một ảnh đầy đủ được gửi để Gemini đọc cả QR và số cân. QR
-local vẫn được đọc độc lập. Nếu hai nguồn xung đột nhưng QR local đã được bộ
-giải mã QR chuyên dụng xác nhận hợp lệ, hệ thống giữ nguyên nội dung QR local;
-Gemini chỉ bổ sung QR khi bộ giải mã local không tìm thấy mã.
+`ROLL_SCALE_WEIGHT_ENGINE=gemini`. Paddle không khởi tạo. Gemini chỉ đọc số
+cân từ vùng LED đã crop, không suy đoán mã SP. Ở lần chụp cân sản phẩm, mã QR
+được trình duyệt và ZXing backend đọc độc lập. Hai bộ giải mã khớp thì tự điền;
+nếu xung đột thì hệ thống để trống và yêu cầu người vận hành kiểm tra.
 
-Với chế độ `local` hoặc `hybrid`, sau khi camera đã được bắt cố định, đơn vị
-triển khai phải hiệu chỉnh ROI hàng số gross cho từng trạm và điền vào
-`config.env`. Chế độ `gemini` toàn ảnh bỏ qua ROI. Mỗi ROI có dạng
+Sau khi camera đã được bắt cố định, đơn vị triển khai nên hiệu chỉnh ROI hàng
+số gross cho từng trạm và điền vào `config.env`; ROI cũng được dùng để tăng tốc
+Gemini. Nếu chưa cấu hình, backend tự dò LED. Mỗi ROI có dạng
 `x1,y1,x2,y2` từ 0 đến 1; các trạm ngăn cách bằng dấu chấm phẩy:
 
 ```text
@@ -88,12 +87,12 @@ bằng `ROLL_SCALE_STATION_COUNT` và đúng thứ tự `ROLL_SCALE_STATION_IDS`
 - Phím `1`, `2`, `3`: chọn trạm đang làm việc.
 - `Space`: chụp ảnh cân lõi và nhận diện đúng camera đang chọn. Giữ yên cân
   cho đến khi trạng thái chuyển sang `CHỜ ẢNH QR`.
-- `Q`: sau khi có số cân lõi, đưa tem QR vào camera và chụp ảnh thứ hai. Mã SP
-  được tự điền từ ảnh này; ảnh cân lõi vẫn được giữ nguyên.
+- `P`: sau khi có số cân lõi, đặt sản phẩm và tem QR trong khung rồi chụp cân
+  sản phẩm. Phần mềm đọc cả số cân sản phẩm và mã SP; ảnh cân lõi vẫn giữ nguyên.
 - `Backspace`: bỏ ngay lần đang xem, không hỏi xác nhận. Khi đang đặt con trỏ
   trong ô QR hoặc số cân, Backspace vẫn chỉ xóa ký tự như bình thường.
-- Kiểm tra số cân, mã SP và cả hai ảnh bằng chứng.
-- `Enter`: lưu mã SP + số cân lõi + hai ảnh trong đúng một event. Sau khi lưu thành công, giao diện tự chọn
+- Kiểm tra số cân lõi, số cân sản phẩm, mã SP và cả hai ảnh bằng chứng.
+- `Enter`: lưu mã SP + hai số cân + hai ảnh trong đúng một event. Sau khi lưu thành công, giao diện tự chọn
   trạm tiếp theo nếu đang bật luân phiên.
 - Không rút camera hoặc tắt máy khi còn bản ghi chưa đồng bộ.
 

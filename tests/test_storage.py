@@ -60,31 +60,32 @@ def test_idempotent_save_persists_capture_identity_and_returns_duplicate(tmp_pat
     store.close()
 
 
-def test_save_keeps_core_and_qr_images_in_one_measurement(tmp_path) -> None:
+def test_save_keeps_core_and_product_images_in_one_measurement(tmp_path) -> None:
     store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
     core_frame = np.full((64, 96, 3), 30, dtype=np.uint8)
-    qr_frame = np.full((80, 120, 3), 220, dtype=np.uint8)
+    product_frame = np.full((80, 120, 3), 220, dtype=np.uint8)
 
     saved = store.save(
-        "PRODUCT-WITH-QR-IMAGE",
+        "PRODUCT-WITH-EVIDENCE-IMAGE",
         1.04,
         "kg",
         core_frame,
         "camera-gemini:test-ui",
-        qr_source="camera-second:opencv",
-        qr_frame=qr_frame,
+        qr_source="camera-product:zxing",
     )
+    store.attach_product_weight(saved.event_id, 13.04)
+    store.attach_product_image(saved.event_id, product_frame)
+    saved = store.get(saved.event_id)
 
+    assert saved is not None
     assert Path(saved.image_path).is_file()
-    assert Path(saved.qr_image_path).is_file()
-    assert saved.image_path != saved.qr_image_path
-    assert saved.qr_frame_sha256 == hashlib.sha256(
-        Path(saved.qr_image_path).read_bytes()
-    ).hexdigest()
+    assert Path(saved.product_image_path).is_file()
+    assert saved.image_path != saved.product_image_path
+    assert saved.product_weight == pytest.approx(13.04)
     assert len(saved.payload_hash) == 64
     payload = saved.api_payload()
-    assert payload["qr_frame_sha256"] == saved.qr_frame_sha256
-    assert "qr_image_path" not in payload
+    assert payload["product_weight"] == pytest.approx(13.04)
+    assert "product_image_path" not in payload
     store.close()
 
 

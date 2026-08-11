@@ -13,6 +13,7 @@ from roll_qr_scale.gemini_weight import GeminiWeightSuggestion
 from roll_qr_scale.storage import MeasurementStore
 from roll_qr_scale.sync import OutboxSyncWorker
 from roll_qr_scale.test_ui import TEST_UI_HTML, StationUIService, decode_image
+from roll_qr_scale.weight_ocr import NormalizedROI
 
 
 def make_qr_frame(value: str) -> np.ndarray:
@@ -131,6 +132,33 @@ def test_ui_save_reports_cloud_failure_but_keeps_complete_local_event(tmp_path) 
     assert saved.qr_code == "PRODUCT-OFFLINE-001"
     assert saved.weight == pytest.approx(13.04)
     assert Path(saved.image_path).is_file()
+
+
+def test_ui_save_keeps_both_weights_and_both_images_in_one_event(tmp_path) -> None:
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(store, None, None, None)
+    core_frame = make_qr_frame("CORE-EVIDENCE")
+    product_frame = make_qr_frame("PRODUCT-EVIDENCE")
+
+    result = service.capture(
+        "PRODUCT-001",
+        1.04,
+        "kg",
+        core_frame,
+        product_frame=product_frame,
+        product_weight=13.04,
+    )
+    saved = store.get(str(result["event_id"]))
+
+    service.close()
+    store.close()
+    assert saved is not None
+    assert saved.qr_code == "PRODUCT-001"
+    assert saved.weight == pytest.approx(1.04)
+    assert saved.product_weight == pytest.approx(13.04)
+    assert Path(saved.image_path).is_file()
+    assert Path(saved.product_image_path).is_file()
+    assert saved.image_path != saved.product_image_path
 
 
 def test_ui_analyzes_qr_and_camera_weight_together(tmp_path, monkeypatch) -> None:
@@ -598,6 +626,95 @@ def test_gemini_full_frame_keeps_local_qr_on_cloud_conflict(tmp_path) -> None:
     assert "kept checksum-validated local QR" in result["weight_raw"]
 
 
+def test_render_capture_crops_detected_led_before_gemini(tmp_path, monkeypatch) -> None:
+    class FakeGeminiReader:
+        def read(self, frames, *, unit):
+            assert len(frames) == 1
+            assert frames[0].shape[0] < 200
+            assert frames[0].shape[1] < 300
+            return GeminiWeightSuggestion(13.04, unit, True, True, "GEMINI:test", 0.2)
+
+        def status(self):
+            return {"enabled": True}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        test_ui_module,
+        "detect_weight_roi",
+        lambda frame: (NormalizedROI(0.4, 0.7, 0.6, 0.8), "red-led"),
+    )
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(
+        store,
+        None,
+        None,
+        None,
+        gemini_reader=FakeGeminiReader(),
+        weight_engine="gemini",
+    )
+
+    result = service.analyze(
+        np.full((600, 800, 3), 180, dtype=np.uint8),
+        "auto",
+        "kg",
+        capture_kind="core",
+    )
+
+    service.close()
+    store.close()
+    assert result["weight"] == pytest.approx(13.04)
+    assert result["gemini_crop_applied"] is True
+    assert result["roi_method"] == "gemini-crop-red-led"
+
+
+def test_browser_qr_is_accepted_but_decoder_conflict_requires_manual_code(tmp_path) -> None:
+    class FakeGeminiReader:
+        def read(self, frames, *, unit):
+            return GeminiWeightSuggestion(9.34, unit, True, True, "GEMINI:test", 0.2)
+
+        def status(self):
+            return {"enabled": True}
+
+        def close(self):
+            pass
+
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(
+        store,
+        None,
+        None,
+        None,
+        gemini_reader=FakeGeminiReader(),
+        weight_engine="gemini",
+    )
+
+    browser_only = service.analyze(
+        np.full((600, 800, 3), 180, dtype=np.uint8),
+        "auto",
+        "kg",
+        capture_kind="product",
+        client_qr_code="SP-BROWSER-001",
+    )
+    conflict = service.analyze(
+        make_qr_frame("SP-SERVER-001"),
+        "auto",
+        "kg",
+        capture_kind="product",
+        client_qr_code="SP-BROWSER-002",
+    )
+
+    service.close()
+    store.close()
+    assert browser_only["qr_code"] == "SP-BROWSER-001"
+    assert browser_only["qr_decoder"] == "browser-barcode-detector"
+    assert browser_only["qr_conflict"] is False
+    assert conflict["qr_found"] is False
+    assert conflict["qr_code"] is None
+    assert conflict["qr_conflict"] is True
+
+
 def test_gemini_accurate_profile_uses_accurate_reader(tmp_path) -> None:
     class FakeGeminiReader:
         def __init__(self, model, value):
@@ -684,7 +801,8 @@ def test_ui_has_capture_controls_without_lookup_panel() -> None:
     for control_id in (
         'id="captureFile"',
         'id="captureFileBtn"',
-        'id="analyzeBtn"',
+        'id="analyzeCoreBtn"',
+        'id="analyzeProductBtn"',
         'id="roiBox"',
         'id="qrBox"',
         'id="roiValue"',
@@ -711,7 +829,7 @@ def test_ui_has_capture_controls_without_lookup_panel() -> None:
 
 
 def test_ui_uses_viet_nhat_red_black_roboto_branding() -> None:
-    assert "Việt Nhật IPT — Trạm cân QR" in TEST_UI_HTML
+    assert "Trạm cân <span>Ai</span> Việt Nhật IPT" in TEST_UI_HTML
     assert '<img class="brand-mark" src="/logo.jpg" alt="Việt Nhật IPT">' in TEST_UI_HTML
     assert "font-family:Roboto" in TEST_UI_HTML
     assert 'local("Roboto Regular")' in TEST_UI_HTML
@@ -761,7 +879,8 @@ def test_ui_has_shift_machine_production_order_fields() -> None:
 def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "session.qr=data.qr_code||''" not in TEST_UI_HTML
     assert "if(isProduct){session.productAnalysis=data" in TEST_UI_HTML
-    assert "if(data.qr_found&&String(data.qr_code||'').trim()&&!String(session.qr||'').trim())session.qr=String(data.qr_code).trim()" in TEST_UI_HTML
+    assert "reliableQr=Boolean(data.qr_found&&!data.qr_conflict&&!qrDecoder.startsWith('gemini'))" in TEST_UI_HTML
+    assert "if(reliableQr&&String(data.qr_code||'').trim()&&!String(session.qr||'').trim())session.qr=String(data.qr_code).trim()" in TEST_UI_HTML
     assert "$('analyzeProductBtn').disabled=busy||!coreReady(session)" in TEST_UI_HTML
     assert "['analyzing','awaiting-weight','awaiting-code','ready','review']" in TEST_UI_HTML
     assert "if(isProduct&&!coreReady(session))" in TEST_UI_HTML
@@ -774,6 +893,14 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "function productReady(session)" in TEST_UI_HTML
     assert "ĐÃ CÂN LÕI · CHỜ CÂN SẢN PHẨM" in TEST_UI_HTML
     assert "Gemini đọc " in TEST_UI_HTML
+    assert "function showPostCaptureSource(session)" in TEST_UI_HTML
+    assert "showPostCaptureSource(session);" in TEST_UI_HTML
+    assert "showCapturedBlank" not in TEST_UI_HTML
+    assert "function cameraVideoConstraints()" in TEST_UI_HTML
+    assert "function tuneCameraTrack(track)" in TEST_UI_HTML
+    assert "function decodeClientQr(canvas)" in TEST_UI_HTML
+    assert "client_qr_code:clientQr" in TEST_UI_HTML
+    assert "CAPTURE_MAX_EDGE=1440" in TEST_UI_HTML
 
 
 def test_ui_enables_local_yolo_model_by_default(monkeypatch, tmp_path) -> None:
@@ -840,7 +967,7 @@ def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
         "Chính xác · Pro · 30s",
         "savedStationIndex=stations.indexOf(session)",
         "captureEditor=event.target===captureQr||event.target===weight||event.target===productWeight",
-        "const failedStream=session.stream",
+        "scheduleReconnect(session,session.deviceId)",
         "this.hydratedPending=Boolean(config.event_id)",
         "function pollPendingSessions()",
         "Chọn camera hoặc ảnh thực tế, rồi chụp cân lõi / cân sản phẩm.",

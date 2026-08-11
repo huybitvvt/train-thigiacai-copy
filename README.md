@@ -1,6 +1,6 @@
 # Hệ thống offline ghép QR với số cân
 
-Một gateway có thể vận hành 1–3 trạm camera logic trong cùng giao diện web. Mỗi trạm giữ preview, ảnh đang kiểm tra và danh tính riêng; tác vụ QR/OCR của các trạm đi qua một hàng đợi FIFO dùng chung để các thư viện nhận dạng không chạy chồng nhau. `Space` chụp ảnh cân lõi, Gemini/local đọc số và giữ ảnh; sau đó `Q` chụp ảnh QR thứ hai và tự điền mã SP. `Enter` commit mã SP + số cân lõi + hai ảnh vào cùng một event SQLite/outbox.
+Một gateway có thể vận hành 1–3 trạm camera logic trong cùng giao diện web. Mỗi trạm giữ preview, ảnh đang kiểm tra và danh tính riêng; tác vụ QR/OCR của các trạm đi qua một hàng đợi FIFO dùng chung để các thư viện nhận dạng không chạy chồng nhau. `Space` chụp cân lõi; sau đó `P` chụp cân sản phẩm và đọc mã SP trong cùng ảnh thứ hai. `Enter` commit mã SP + hai số cân + hai ảnh vào cùng một event SQLite/outbox.
 
 Mã nguồn được tách theo ranh giới triển khai:
 
@@ -17,7 +17,7 @@ Cloudinary + Supabase là lớp đồng bộ tùy chọn. Khi không cấu hình
 Trình duyệt: station-01 -> deviceId camera A --+
              station-02 -> deviceId camera B --+--> Space: ảnh cân lõi + số cân
              station-03 -> deviceId camera C --+          |
-                                                           +--> Q: ảnh QR + mã SP
+                                                           +--> P: cân SP + mã SP
                                                                     |
                                                      cùng một event_id
                                                                     |
@@ -185,8 +185,8 @@ Mở `http://127.0.0.1:8080` rồi vận hành như sau:
 1. Cho phép quyền camera, bấm `Làm mới camera`, sau đó chọn đúng camera vật lý trong dropdown của từng trạm. Không dựa vào thứ tự camera `0/1/2` của hệ điều hành.
 2. Ánh xạ browser `deviceId` được lưu trong `localStorage` theo `gateway_id`. Một camera vật lý không thể gán cho hai trạm. Nếu đổi browser/profile/cổng USB làm `deviceId` đổi, chọn lại camera.
 3. Bấm `Mở camera đã gán`. Khi camera rớt kết nối, card chuyển sang `MẤT KẾT NỐI`; giao diện chỉ thử lại đúng `deviceId` đã gán và từ chối stream nếu browser trả nhầm camera. Sự kiện cắm/rút USB cũng kích hoạt làm mới và reconnect.
-4. Chọn trạm bằng card hoặc phím `1`, `2`, `3`. `Space` chỉ chụp cân lõi của trạm đang chọn; số cân và ảnh đầu được giữ nguyên. Khi trạng thái chuyển sang `CHỜ ẢNH QR`, đưa tem vào camera rồi nhấn `Q` hoặc nút `Chụp ảnh QR` để chụp ảnh thứ hai và tự điền mã SP.
-5. Kiểm tra số cân, hai preview bằng chứng và mã SP tự đọc. `Enter` chỉ lưu khi đủ số cân + ảnh cân lõi + ảnh QR + mã SP trong cùng event. Dùng `Bỏ lần đang xem` nếu thật sự muốn hủy cả phiên.
+4. Chọn trạm bằng card hoặc phím `1`, `2`, `3`. `Space` chụp cân lõi; số cân và ảnh đầu được giữ nguyên. Sau đó đặt sản phẩm cùng tem QR trong khung rồi nhấn `P` hoặc nút `Chụp cân SP` để đọc số cân sản phẩm và mã SP từ ảnh thứ hai.
+5. Kiểm tra hai số cân, hai preview bằng chứng và mã SP tự đọc. `Enter` chỉ lưu khi đủ hai số cân + hai ảnh + mã SP trong cùng event. Dùng `Bỏ lần đang xem` nếu thật sự muốn hủy cả phiên.
 6. Sau khi SQLite commit thành công, tùy chọn auto-advance chọn trạm kế tiếp theo vòng tròn. Checkbox trên giao diện có thể đổi hành vi trong phiên hiện tại.
 
 Nút `Dùng ảnh demo kho` nạp QR `ROLL-WAREHOUSE-002015` và cân `20.15 kg` vào trạm đang chọn. Chọn tệp ảnh cũng tự phân tích tại trạm đang chọn. Khi đã cấu hình cloud, outbox gửi nền sau commit local; lỗi mạng không làm request lưu tại trạm thất bại. YOLO là tùy chọn, còn QR rõ được ZXing/OpenCV giải mã trực tiếp.
@@ -242,7 +242,7 @@ Thao tác mỗi lần cân:
 3. Kiểm tra mã, số cân và độ tin cậy trên cửa sổ.
 4. Đúng thì nhấn `Enter` để lưu; sai thì chỉnh vị trí/ánh sáng và nhấn `Space` chụp lại.
 
-Camera có thể mở cả ca, nhưng YOLO/PaddleOCR không chạy liên tục. Chế độ `local`/`hybrid` chỉ lấy burst khi nhấn `Space`; mặc định chụp 5 frame rồi chọn đúng 3 frame đầu–giữa–cuối. Chế độ `gemini` luôn chụp và gửi đúng một ảnh đầy đủ cho mỗi lần nhấn `Space`; nút chọn ảnh cũng gửi đúng một ảnh. Chế độ CLI `roll-qr-scale` vẫn đọc một ảnh như trước.
+Camera có thể mở cả ca, nhưng YOLO/PaddleOCR không chạy liên tục. Chế độ `local`/`hybrid` chỉ lấy burst khi bấm chụp; mặc định chụp 5 frame rồi chọn đúng 3 frame đầu–giữa–cuối. Chế độ `gemini` gửi một ảnh JPEG đã nén cho mỗi lần chụp; backend dùng ROI cấu hình hoặc tự dò LED để crop trước khi gọi Gemini. Chế độ CLI `roll-qr-scale` vẫn đọc một ảnh như trước.
 
 ### Gemini fallback tùy chọn
 
@@ -259,10 +259,10 @@ $env:ROLL_SCALE_GEMINI_TIMEOUT = "10.0"
 
 `ROLL_SCALE_WEIGHT_ENGINE` có ba chế độ: `local` chỉ dùng Paddle, `hybrid`
 dùng Paddle trước rồi Gemini xác nhận ứng viên local, và `gemini` dùng Gemini
-làm bộ đọc chính. Ở chế độ `gemini`, vẫn chỉ có một camera: mỗi lần nhấn
-`Space` hoặc chọn tệp, đúng một ảnh đầy đủ được gửi trong một API request để
-đọc cả QR và số cân; Paddle không preload hoặc suy luận. QR local vẫn được đọc
-độc lập: nếu hai nguồn khác nhau, hệ thống từ chối lưu thay vì chọn một giá trị.
+làm bộ đọc chính. Ở chế độ `gemini`, mỗi lần chụp gửi một ảnh bằng chứng đã
+nén; backend crop vùng LED rồi chỉ yêu cầu Gemini đọc số cân. Paddle không
+preload hoặc suy luận. Mã SP do BarcodeDetector trên trình duyệt và ZXing
+backend đọc độc lập; nếu hai nguồn khác nhau, hệ thống không tự điền mã.
 
 Luồng hybrid chấp nhận theo kiểu fail-closed:
 
@@ -271,7 +271,7 @@ Luồng hybrid chấp nhận theo kiểu fail-closed:
 3. Chỉ chốt khi Gemini trả đúng định dạng hai số thập phân, ba ảnh đồng nhất và giá trị khớp tuyệt đối ứng viên local.
 4. Gemini lỗi, timeout, trả khác local hoặc không có ứng viên local thì không lưu tự động; giao diện giữ trạng thái cần kiểm tra.
 
-Ngưỡng OCR `0.60` chỉ là cổng loại kết quả Paddle quá yếu, không phải xác suất hệ thống đúng 60%. Điều kiện quyết định chính là đồng thuận số tuyệt đối qua các frame. Free tier/quota và đơn giá Gemini có thể thay đổi. Chế độ toàn ảnh gửi toàn bộ nội dung khung hình tới Google, nên chỉ bật sau khi khách hàng chấp thuận chính sách dữ liệu và không coi cloud là phụ thuộc bắt buộc.
+Ngưỡng OCR `0.60` chỉ là cổng loại kết quả Paddle quá yếu, không phải xác suất hệ thống đúng 60%. Điều kiện quyết định chính là đồng thuận số tuyệt đối qua các frame. Free tier/quota và đơn giá Gemini có thể thay đổi. Ảnh camera vẫn được xử lý qua dịch vụ cloud khi bật Gemini, nên chỉ bật sau khi khách hàng chấp thuận chính sách dữ liệu và không coi cloud là phụ thuộc bắt buộc.
 
 ### Đọc cân qua RS232/USB
 

@@ -16,6 +16,9 @@ DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 DEFAULT_GEMINI_ACCURATE_MODEL = "gemini-3.1-pro-preview"
 DEFAULT_GEMINI_TIMEOUT_SECONDS = 10.0
 DEFAULT_GEMINI_ACCURATE_TIMEOUT_SECONDS = 30.0
+DEFAULT_GEMINI_MAX_IMAGE_EDGE = 1280
+DEFAULT_GEMINI_JPEG_QUALITY = 86
+DEFAULT_GEMINI_MEDIA_RESOLUTION = "medium"
 _FIXED_WEIGHT = re.compile(r"^(?:0|[1-9]\d{0,3})\.\d{2}$")
 
 
@@ -74,6 +77,10 @@ class GeminiWeightReader:
         model: str = DEFAULT_GEMINI_MODEL,
         timeout_seconds: float = DEFAULT_GEMINI_TIMEOUT_SECONDS,
         thinking_level: str = "minimal",
+        max_image_edge: int = DEFAULT_GEMINI_MAX_IMAGE_EDGE,
+        jpeg_quality: int = DEFAULT_GEMINI_JPEG_QUALITY,
+        media_resolution: str = DEFAULT_GEMINI_MEDIA_RESOLUTION,
+        include_qr: bool = True,
         client: object | None = None,
     ) -> None:
         if not api_key.strip():
@@ -84,10 +91,20 @@ class GeminiWeightReader:
             raise ValueError("Gemini timeout must be between 10 and 30 seconds")
         if thinking_level not in {"minimal", "low", "medium", "high"}:
             raise ValueError("Gemini thinking level is invalid")
+        if not 512 <= int(max_image_edge) <= 2048:
+            raise ValueError("Gemini max image edge must be between 512 and 2048")
+        if not 70 <= int(jpeg_quality) <= 95:
+            raise ValueError("Gemini JPEG quality must be between 70 and 95")
+        if media_resolution not in {"low", "medium", "high"}:
+            raise ValueError("Gemini media resolution must be low, medium or high")
         self.api_key = api_key.strip()
         self.model = model.strip()
         self.timeout_seconds = float(timeout_seconds)
         self.thinking_level = thinking_level
+        self.max_image_edge = int(max_image_edge)
+        self.jpeg_quality = int(jpeg_quality)
+        self.media_resolution = media_resolution
+        self.include_qr = bool(include_qr)
         if client is None:
             try:
                 from google import genai
@@ -126,17 +143,23 @@ class GeminiWeightReader:
         middle = len(usable) // 2
         return [usable[0], usable[middle], usable[-1]]
 
-    @staticmethod
-    def _jpeg(image: np.ndarray) -> bytes:
+    def _jpeg(self, image: np.ndarray) -> bytes:
         if image.ndim == 2:
             prepared = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
         elif image.ndim == 3 and image.shape[2] >= 3:
             prepared = image[:, :, :3]
         else:
             raise ValueError("Gemini camera image is invalid")
-        # Keep small test fixtures legible to the vision encoder. Real camera
-        # frames are sent at their original resolution.
         height, width = prepared.shape[:2]
+        longest = max(height, width)
+        if longest > self.max_image_edge:
+            scale = self.max_image_edge / longest
+            prepared = cv2.resize(
+                prepared,
+                (max(1, round(width * scale)), max(1, round(height * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
+            height, width = prepared.shape[:2]
         if height < 256:
             scale = 256 / max(1, height)
             prepared = cv2.resize(
@@ -147,7 +170,7 @@ class GeminiWeightReader:
         ok, encoded = cv2.imencode(
             ".jpg",
             prepared,
-            [cv2.IMWRITE_JPEG_QUALITY, 95],
+            [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality],
         )
         if not ok:
             raise ValueError("Cannot encode Gemini ROI image")
@@ -192,20 +215,26 @@ class GeminiWeightReader:
             from google.genai import types
 
             image_description = (
-                "one full factory-camera image"
+                "one factory-camera image or a focused display crop"
                 if len(sampled) == 1
-                else "three chronological full frames from the same factory camera"
+                else "three chronological images from the same factory camera"
+            )
+            qr_instruction = (
+                "Also find the product QR label and decode its encoded content exactly "
+                "into qr_code; do not substitute nearby printed text. "
+                if self.include_qr
+                else "Do not read or infer a product code; set qr_readable=false and qr_code=null. "
             )
             prompt = (
-                f"These are {image_description}. Inspect the entire image; do not rely "
-                "on a supplied crop or bounding box. Find the electronic scale and read "
+                f"These are {image_description}. Inspect the entire supplied image. "
+                "Find the electronic scale display and read "
                 "only the illuminated digit glyphs in its top gross-weight row, left to "
                 "right. Return weight_digits without a decimal point. A small round "
                 "decimal LED is punctuation, never a zero digit. The scale always has "
                 "two decimal places: 7.02 means weight_digits=\"702\" and 13.04 means "
-                "weight_digits=\"1304\". Also find the product QR label and decode its "
-                "encoded content exactly into qr_code; do not substitute nearby printed "
-                "text. Treat the lower tare/net rows, keypad, labels, dates and other "
+                "weight_digits=\"1304\". "
+                + qr_instruction
+                + "Treat the lower tare/net rows, keypad, labels, dates and other "
                 "numbers as irrelevant. If an item cannot be read exactly, set its "
                 "readable flag false and its value null. For three images, set "
                 "all_frames_agree=false if any visible weight or QR content conflicts. "
@@ -214,7 +243,11 @@ class GeminiWeightReader:
             )
             contents: list[object] = [prompt]
             contents.extend(
-                types.Part.from_bytes(data=self._jpeg(frame), mime_type="image/jpeg")
+                types.Part.from_bytes(
+                    data=self._jpeg(frame),
+                    mime_type="image/jpeg",
+                    media_resolution=f"MEDIA_RESOLUTION_{self.media_resolution.upper()}",
+                )
                 for frame in sampled
             )
             thinking_config = (
@@ -226,7 +259,7 @@ class GeminiWeightReader:
                 model=self.model,
                 contents=contents,
                 config=types.GenerateContentConfig(
-                    max_output_tokens=160,
+                    max_output_tokens=112,
                     response_mime_type="application/json",
                     response_schema=_GEMINI_RESPONSE_SCHEMA,
                     thinking_config=thinking_config,
@@ -257,7 +290,8 @@ class GeminiWeightReader:
                 valid = False
             qr_code = (payload.qr_code or "").strip()
             qr_valid = (
-                payload.qr_readable
+                self.include_qr
+                and payload.qr_readable
                 and agreement
                 and 1 <= len(qr_code) <= 512
                 and all(ord(character) >= 32 for character in qr_code)
@@ -315,6 +349,10 @@ class GeminiWeightReader:
                 "enabled": True,
                 "model": self.model,
                 "thinking_level": self.thinking_level,
+                "media_resolution": self.media_resolution,
+                "max_image_edge": self.max_image_edge,
+                "jpeg_quality": self.jpeg_quality,
+                "include_qr": self.include_qr,
                 "timeout_seconds": self.timeout_seconds,
                 "requests": self._requests,
                 "successes": self._successes,

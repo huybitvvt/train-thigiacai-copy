@@ -21,6 +21,27 @@ def test_decodes_qr_from_frame() -> None:
     assert detections[0].decoder in {"zxing", "opencv", "opencv-curved"}
 
 
+def test_decodes_small_low_contrast_qr_after_grayscale_preprocessing() -> None:
+    value = "SP-2026-000123"
+    qr_image = np.asarray(qrcode.make(value).convert("RGB"))
+    qr_bgr = cv2.resize(
+        cv2.cvtColor(qr_image, cv2.COLOR_RGB2BGR),
+        (64, 64),
+        interpolation=cv2.INTER_AREA,
+    )
+    qr_bgr = np.clip(128 + (qr_bgr.astype(np.float32) - 128) * 0.35, 0, 255).astype(
+        np.uint8
+    )
+    qr_bgr = cv2.GaussianBlur(qr_bgr, (3, 3), 0.7)
+    frame = np.full((720, 1280, 3), 205, dtype=np.uint8)
+    frame[300:364, 600:664] = qr_bgr
+
+    detections = QRReader().decode(frame)
+
+    assert [item.value for item in detections] == [value]
+    assert detections[0].decoder.startswith("zxing")
+
+
 def test_decoder_first_success_does_not_call_yolo_fallback() -> None:
     class ModelMustNotRun:
         def predict(self, *args, **kwargs):
