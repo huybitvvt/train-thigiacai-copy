@@ -302,6 +302,12 @@ giữ nguyên khóa đó qua mọi lần deploy. Đây là tích hợp endpoint 
 không phải OpenAI API ổn định dành cho production; OpenAI có thể thay đổi luồng
 hoặc giới hạn tài khoản. Khi Codex lỗi, chọn lại Gemini API để tiếp tục vận hành.
 
+Nút `Đổi key Gemini` cho phép quản trị thay key mà không sửa biến môi trường và
+không redeploy. Backend kiểm tra key mới trực tiếp với Google; chỉ khi hợp lệ mới
+mã hóa Fernet và lưu qua Edge Function vào `roll_scale_secrets`, sau đó thay cả
+reader Nhanh và Chính xác trong tiến trình đang chạy. Key hiện tại không bao giờ
+được trả về browser. Nếu Supabase/Google lỗi, key cũ tiếp tục được dùng.
+
 ### Đọc cân qua RS232/USB
 
 Phương án production ưu tiên: đầu đọc QR USB HID, cân ở `COM3`, camera bằng chứng số 0. Cấu hình scanner tự gửi phím `Enter` sau mỗi mã:

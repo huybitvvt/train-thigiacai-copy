@@ -129,7 +129,7 @@ def _expires_at(tokens: dict[str, Any]) -> int:
 
 
 class EncryptedCodexTokenStore:
-    """Persist one encrypted OAuth payload through the protected ingest function."""
+    """Persist one encrypted backend secret through the protected ingest function."""
 
     def __init__(
         self,
@@ -137,12 +137,14 @@ class EncryptedCodexTokenStore:
         device_token: str | None,
         *,
         secret_name: str,
+        secret_action: str = "codex-auth",
         encryption_key: str = "",
         timeout_seconds: float = 15.0,
     ) -> None:
         self.api_url = (api_url or "").strip()
         self.device_token = (device_token or "").strip()
         self.secret_name = secret_name.strip()
+        self.secret_action = secret_action.strip()
         self.timeout_seconds = float(timeout_seconds)
         self._config_error = ""
         self._fernet: Fernet | None = None
@@ -172,8 +174,8 @@ class EncryptedCodexTokenStore:
 
     def read(self) -> dict[str, Any] | None:
         if not self.configured or self._fernet is None:
-            raise CodexOAuthError(self.config_error or "Kho token Codex chưa cấu hình")
-        query = urllib.parse.urlencode({"action": "codex-auth", "name": self.secret_name})
+            raise CodexOAuthError(self.config_error or "Kho bí mật mã hóa chưa cấu hình")
+        query = urllib.parse.urlencode({"action": self.secret_action, "name": self.secret_name})
         result = _http_json(
             f"{self.api_url}?{query}",
             headers=self._headers(),
@@ -187,15 +189,15 @@ class EncryptedCodexTokenStore:
             value = json.loads(plaintext.decode("utf-8"))
         except (InvalidToken, ValueError, UnicodeError) as exc:
             raise CodexOAuthError(
-                "Không giải mã được đăng nhập Codex; token thiết bị hoặc khóa mã hóa đã thay đổi"
+                "Không giải mã được bí mật backend; token thiết bị hoặc khóa mã hóa đã thay đổi"
             ) from exc
         if not isinstance(value, dict):
-            raise CodexOAuthError("Dữ liệu đăng nhập Codex không hợp lệ")
+            raise CodexOAuthError("Dữ liệu bí mật backend không hợp lệ")
         return value
 
     def write(self, value: dict[str, Any]) -> None:
         if not self.configured or self._fernet is None:
-            raise CodexOAuthError(self.config_error or "Kho token Codex chưa cấu hình")
+            raise CodexOAuthError(self.config_error or "Kho bí mật mã hóa chưa cấu hình")
         encrypted = self._fernet.encrypt(
             json.dumps(value, separators=(",", ":")).encode("utf-8")
         ).decode("ascii")
@@ -203,7 +205,7 @@ class EncryptedCodexTokenStore:
             self.api_url,
             method="POST",
             payload={
-                "action": "codex-auth",
+                "action": self.secret_action,
                 "name": self.secret_name,
                 "encrypted_value": encrypted,
             },

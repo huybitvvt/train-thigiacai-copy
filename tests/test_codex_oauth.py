@@ -37,6 +37,7 @@ def test_encrypted_store_never_sends_plain_access_token(monkeypatch) -> None:
     def fake_http(url, **kwargs):
         requests.append((url, kwargs))
         if kwargs.get("method") == "POST":
+            assert kwargs["payload"]["action"] == "codex-auth"
             return {"ok": True}
         encrypted = requests[0][1]["payload"]["encrypted_value"]
         return {"ok": True, "found": True, "encrypted_value": encrypted}

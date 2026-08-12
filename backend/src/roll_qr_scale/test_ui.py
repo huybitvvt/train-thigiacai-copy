@@ -28,6 +28,7 @@ from .gemini_weight import (
     DEFAULT_GEMINI_TIMEOUT_SECONDS,
     GeminiWeightReader,
 )
+from .gemini_key_manager import GeminiKeyManager
 from .codex_weight import DEFAULT_CODEX_TIMEOUT_SECONDS, CodexWeightReader
 from .codex_oauth import CodexOAuthClient, EncryptedCodexTokenStore
 from .codex_oauth_weight import CodexOAuthWeightReader
@@ -298,6 +299,7 @@ class StationUIService:
         weight_burst_frames: int = DEFAULT_WEIGHT_BURST_FRAMES,
         gemini_reader: GeminiWeightReader | None = None,
         gemini_accurate_reader: GeminiWeightReader | None = None,
+        gemini_key_manager: GeminiKeyManager | None = None,
         codex_reader: CodexWeightReader | CodexOAuthWeightReader | None = None,
         weight_engine: str = "local",
     ):
@@ -339,6 +341,8 @@ class StationUIService:
         self.weight_burst_frames = int(weight_burst_frames)
         self.gemini_reader = gemini_reader
         self.gemini_accurate_reader = gemini_accurate_reader
+        self.gemini_key_manager = gemini_key_manager
+        self._retired_gemini_readers: list[GeminiWeightReader] = []
         self.codex_reader = codex_reader
         self.weight_engine = weight_engine
         self.weight_rois: dict[str, NormalizedROI] = {
@@ -413,6 +417,8 @@ class StationUIService:
             and self.gemini_accurate_reader is not self.gemini_reader
         ):
             self.gemini_accurate_reader.close()
+        for reader in self._retired_gemini_readers:
+            reader.close()
         if self.codex_reader is not None:
             self.codex_reader.close()
 
@@ -437,6 +443,26 @@ class StationUIService:
         if self.gemini_reader is None:
             raise RuntimeError("Gemini primary chưa được cấu hình")
         return self.gemini_reader
+
+    def replace_gemini_key(self, api_key: str) -> dict[str, object]:
+        if self.gemini_key_manager is None:
+            raise ValueError("Chức năng đổi Gemini key chưa được cấu hình")
+        fast, accurate = self.gemini_key_manager.replace(api_key)
+        with self._lock:
+            old_fast = self.gemini_reader
+            old_accurate = self.gemini_accurate_reader
+            self.gemini_reader = fast
+            self.gemini_accurate_reader = accurate
+        if old_fast is not None:
+            self._retired_gemini_readers.append(old_fast)
+        if old_accurate is not None and old_accurate is not old_fast:
+            self._retired_gemini_readers.append(old_accurate)
+        return {
+            "ok": True,
+            "changed": True,
+            "stored_encrypted": True,
+            "message": "Đã kiểm tra, mã hóa và áp dụng Gemini API key mới",
+        }
 
     @staticmethod
     def _roi_text(roi: NormalizedROI | None) -> str:
@@ -476,7 +502,10 @@ class StationUIService:
             "ocr_ready": self._ocr_reader is not None,
             "ocr_preload_error": self._ocr_preload_error,
             "gemini": (
-                self.gemini_reader.status()
+                {
+                    **self.gemini_reader.status(),
+                    **(self.gemini_key_manager.status() if self.gemini_key_manager else {}),
+                }
                 if self.gemini_reader is not None
                 else {"enabled": False}
             ),
@@ -1477,12 +1506,29 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
         weight_engine = "hybrid"
     gemini_reader = None
     gemini_accurate_reader = None
+    gemini_key_manager = None
     if weight_engine in {"hybrid", "gemini"}:
-        gemini_api_key = os.environ.get("ROLL_SCALE_GEMINI_API_KEY", "").strip()
+        gemini_key_store = EncryptedCodexTokenStore(
+            args.api_url,
+            args.api_token,
+            secret_name=f"gemini-api-key:{args.gateway_id}",
+            secret_action="encrypted-secret",
+            encryption_key=os.environ.get("ROLL_SCALE_GEMINI_KEY_ENCRYPTION_KEY", "")
+            or os.environ.get("ROLL_SCALE_CODEX_TOKEN_KEY", ""),
+        )
+        gemini_key_manager = GeminiKeyManager(
+            gemini_key_store,
+            fast_model=args.gemini_model,
+            accurate_model=args.gemini_accurate_model,
+            fast_timeout=args.gemini_timeout,
+            accurate_timeout=args.gemini_accurate_timeout,
+            initial_key=os.environ.get("ROLL_SCALE_GEMINI_API_KEY", ""),
+        )
+        gemini_api_key = gemini_key_manager.load_key()
         if not gemini_api_key:
             raise ValueError(
-                f"weight_engine={weight_engine} cần ROLL_SCALE_GEMINI_API_KEY "
-                "trong biến môi trường"
+                f"weight_engine={weight_engine} cần Gemini API key trong biến môi trường "
+                "hoặc kho key mã hóa Supabase"
             )
         gemini_reader = GeminiWeightReader(
             gemini_api_key,
@@ -1560,6 +1606,7 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
         weight_burst_frames=args.weight_burst_frames,
         gemini_reader=gemini_reader,
         gemini_accurate_reader=gemini_accurate_reader,
+        gemini_key_manager=gemini_key_manager,
         codex_reader=codex_reader,
         weight_engine=weight_engine,
     )
@@ -1866,6 +1913,9 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     if poll_login is None:
                         raise ValueError("Chế độ Codex local không dùng đăng nhập web")
                     self.send_json(200, poll_login(str(payload.get("session_id", ""))))
+                    return
+                if self.path == "/api/gemini/key":
+                    self.send_json(200, service.replace_gemini_key(str(payload.get("api_key", ""))))
                     return
                 frame = decode_image(str(payload.get("image", "")))
                 product_frame = (

@@ -164,7 +164,7 @@ Deno.serve(async (request: Request) => {
   const requestUrl = new URL(request.url);
   const action = requestUrl.searchParams.get("action") ?? "";
 
-  if (request.method === "GET" && action === "codex-auth") {
+  if (request.method === "GET" && (action === "codex-auth" || action === "encrypted-secret")) {
     const name = requestUrl.searchParams.get("name")?.trim() ?? "";
     if (!ID_PATTERN.test(name)) {
       return json(422, { ok: false, error: "invalid_secret_name" });
@@ -223,7 +223,7 @@ Deno.serve(async (request: Request) => {
     return json(400, { ok: false, error: "invalid_json" });
   }
 
-  if (body.action === "codex-auth") {
+  if (body.action === "codex-auth" || body.action === "encrypted-secret") {
     const name = typeof body.name === "string" ? body.name.trim() : "";
     const encryptedValue = typeof body.encrypted_value === "string"
       ? body.encrypted_value.trim()
