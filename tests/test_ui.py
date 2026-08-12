@@ -1030,7 +1030,7 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "PRODUCT_WEIGHT=" in TEST_UI_HTML
     assert "function productReady(session)" in TEST_UI_HTML
     assert "ĐÃ CÂN LÕI · CHỜ CÂN SẢN PHẨM" in TEST_UI_HTML
-    assert "Gemini đọc " in TEST_UI_HTML
+    assert "AI đọc " in TEST_UI_HTML
     assert "function showPostCaptureSource(session)" in TEST_UI_HTML
     assert "showPostCaptureSource(session);" in TEST_UI_HTML
     assert "showCapturedBlank" not in TEST_UI_HTML
