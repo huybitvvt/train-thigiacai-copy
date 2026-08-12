@@ -1019,9 +1019,9 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "if(isProduct){session.productAnalysis=data" in TEST_UI_HTML
     assert "reliableQr=Boolean(data.qr_found&&!data.qr_conflict&&!qrDecoder.startsWith('gemini'))" in TEST_UI_HTML
     assert "if(reliableQr&&String(data.qr_code||'').trim()&&!String(session.qr||'').trim())session.qr=String(data.qr_code).trim()" in TEST_UI_HTML
-    assert "$('analyzeProductBtn').disabled=busy||!coreReady(session)" in TEST_UI_HTML
-    assert "['analyzing','awaiting-weight','awaiting-code','ready','review']" in TEST_UI_HTML
-    assert "if(isProduct&&!coreReady(session))" in TEST_UI_HTML
+    assert "$('analyzeProductBtn').disabled=busy||!coreCaptured(session)" in TEST_UI_HTML
+    assert "function coreCaptured(session)" in TEST_UI_HTML
+    assert "if(isProduct&&!coreCaptured(session))" in TEST_UI_HTML
     assert 'id="analyzeCoreBtn"' in TEST_UI_HTML
     assert 'id="analyzeProductBtn"' in TEST_UI_HTML
     assert 'id="productWeight"' in TEST_UI_HTML
