@@ -3,6 +3,7 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 const MAX_IMAGE_BYTES = 6 * 1024 * 1024;
 const UNITS = new Set(["kg", "g", "lb"]);
 const MEASUREMENT_TABLE = "can_tu_dong";
+const SECRET_TABLE = "roll_scale_secrets";
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/i;
 const EVENT_SELECT =
@@ -160,6 +161,37 @@ Deno.serve(async (request: Request) => {
     return json(401, { ok: false, error: "unauthorized" });
   }
 
+  const requestUrl = new URL(request.url);
+  const action = requestUrl.searchParams.get("action") ?? "";
+
+  if (request.method === "GET" && action === "codex-auth") {
+    const name = requestUrl.searchParams.get("name")?.trim() ?? "";
+    if (!ID_PATTERN.test(name)) {
+      return json(422, { ok: false, error: "invalid_secret_name" });
+    }
+    const supabaseUrl = Deno.env.get("SUPABASE_URL");
+    const serviceKey = getSupabaseAdminKey();
+    if (!supabaseUrl || !serviceKey) {
+      return json(500, { ok: false, error: "supabase_not_configured" });
+    }
+    const supabase = createClient(supabaseUrl, serviceKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+    const { data, error } = await supabase
+      .from(SECRET_TABLE)
+      .select("encrypted_value")
+      .eq("name", name)
+      .maybeSingle();
+    if (error) {
+      return json(500, { ok: false, error: "secret_read_failed" });
+    }
+    return json(200, {
+      ok: true,
+      found: Boolean(data),
+      encrypted_value: data?.encrypted_value ?? null,
+    });
+  }
+
   if (request.method === "GET") {
     const supabaseUrl = Deno.env.get("SUPABASE_URL");
     const serviceKey = getSupabaseAdminKey();
@@ -189,6 +221,39 @@ Deno.serve(async (request: Request) => {
     body = await request.json();
   } catch {
     return json(400, { ok: false, error: "invalid_json" });
+  }
+
+  if (body.action === "codex-auth") {
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    const encryptedValue = typeof body.encrypted_value === "string"
+      ? body.encrypted_value.trim()
+      : "";
+    if (!ID_PATTERN.test(name)) {
+      return json(422, { ok: false, error: "invalid_secret_name" });
+    }
+    if (!encryptedValue || encryptedValue.length > 16384) {
+      return json(422, { ok: false, error: "invalid_encrypted_value" });
+    }
+    const supabaseUrl = Deno.env.get("SUPABASE_URL");
+    const serviceKey = getSupabaseAdminKey();
+    if (!supabaseUrl || !serviceKey) {
+      return json(500, { ok: false, error: "supabase_not_configured" });
+    }
+    const supabase = createClient(supabaseUrl, serviceKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+    const { error } = await supabase.from(SECRET_TABLE).upsert(
+      {
+        name,
+        encrypted_value: encryptedValue,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "name" },
+    );
+    if (error) {
+      return json(500, { ok: false, error: "secret_write_failed" });
+    }
+    return json(200, { ok: true, stored: true });
   }
 
   const eventId = typeof body.event_id === "string" ? body.event_id : "";

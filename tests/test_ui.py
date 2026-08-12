@@ -1144,6 +1144,7 @@ def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
     assert args.gemini_accurate_model == "gemini-3.1-pro-preview"
     assert args.gemini_accurate_timeout == pytest.approx(30.0)
     assert args.codex_enabled is True
+    assert args.codex_mode == "auto"
     assert args.codex_command == "codex"
     assert args.codex_model == ""
     assert args.codex_timeout == pytest.approx(60.0)

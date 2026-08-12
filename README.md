@@ -110,7 +110,7 @@ npx.cmd supabase@latest functions deploy lookup-roll --no-verify-jwt --use-api
 Set-Location ..
 ```
 
-`db push` áp dụng tuần tự toàn bộ [backend/supabase/migrations](backend/supabase/migrations), gồm schema ingest ban đầu, Cloudinary, bảng `can_tu_dong`, danh tính/hash và migration ảnh QR `20260806173000_qr_evidence_image.sql`. Phải chạy migration trước rồi mới deploy lại hai Function; Edge Function mới chọn/ghi các cột QR nên đảo thứ tự sẽ làm request lỗi. Nếu không dùng CLI, [backend/supabase_schema.sql](backend/supabase_schema.sql) là bản schema gộp để chạy có kiểm soát trong SQL Editor.
+`db push` áp dụng tuần tự toàn bộ [backend/supabase/migrations](backend/supabase/migrations), gồm schema ingest ban đầu, Cloudinary, bảng `can_tu_dong`, danh tính/hash, ảnh QR và kho OAuth Codex mã hóa `20260812150000_codex_oauth.sql`. Phải chạy migration trước rồi mới deploy lại hai Function; Edge Function mới chọn/ghi các cột hoặc bảng mới nên đảo thứ tự sẽ làm request lỗi. Nếu không dùng CLI, [backend/supabase_schema.sql](backend/supabase_schema.sql) là bản schema gộp để chạy có kiểm soát trong SQL Editor.
 
 SQLite local tự thêm cột còn thiếu khi gateway mở database cũ và không xóa ảnh/bản ghi lịch sử. Hàng cũ giữ danh tính rỗng; hash được dựng lại từ hàng/ảnh hiện có khi có thể, còn ảnh legacy đã mất thì hash để rỗng thay vì bịa bằng chứng. `device_id` cloud cũ vẫn được đọc như fallback cho `gateway_id`, còn mọi capture mới phải mang bộ danh tính mới.
 
@@ -120,6 +120,7 @@ Schema tạo:
 - `rolls`: QR cuộn hàng và thời điểm nhìn thấy.
 - `can_tu_dong`: lịch sử cân tự động append-only, unique theo `event_id`; ảnh cân lõi nằm trong `core_image_*`, ảnh QR thứ hai nằm trong `qr_image_*`. Các cột `image_*` vẫn trỏ ảnh cân lõi để tương thích bản cũ.
 - `measurements`: bảng cũ được giữ để tương thích; migration sao chép lịch sử sang `can_tu_dong` trước khi Edge Function chuyển bảng.
+- `roll_scale_secrets`: chỉ service role được đọc/ghi; giữ payload OAuth Codex đã mã hóa để Render không mất đăng nhập khi redeploy.
 - Bucket private `roll-captures` được giữ để tra cứu tương thích ảnh cũ; lần cân mới dùng Cloudinary.
 - RLS bật; không cấp quyền trực tiếp cho `anon` hoặc `authenticated`.
 
@@ -273,10 +274,10 @@ Luồng hybrid chấp nhận theo kiểu fail-closed:
 
 Ngưỡng OCR `0.60` chỉ là cổng loại kết quả Paddle quá yếu, không phải xác suất hệ thống đúng 60%. Điều kiện quyết định chính là đồng thuận số tuyệt đối qua các frame. Free tier/quota và đơn giá Gemini có thể thay đổi. Ảnh camera vẫn được xử lý qua dịch vụ cloud khi bật Gemini, nên chỉ bật sau khi khách hàng chấp thuận chính sách dữ liệu và không coi cloud là phụ thuộc bắt buộc.
 
-### Codex đăng nhập ChatGPT (chỉ máy local)
+### Codex đăng nhập ChatGPT
 
-Gemini API vẫn là lựa chọn mặc định. Trên máy chạy backend có cài Codex CLI,
-đăng nhập một lần rồi khởi động lại UI:
+Gemini API vẫn là lựa chọn mặc định và không bị thay thế. Máy local mặc định
+dùng Codex CLI đã đăng nhập:
 
 ```powershell
 codex login --device-auth
@@ -289,9 +290,17 @@ $env:ROLL_SCALE_CODEX_ENABLED = "true"
 Trong giao diện chọn `AI -> Codex · ChatGPT`; có thể đổi lại `Gemini API` bất
 cứ lúc nào. Codex chỉ đọc ảnh cân, còn QR vẫn do bộ giải mã QR độc lập xử lý.
 Mỗi lần gọi dùng thư mục tạm, sandbox read-only, không nạp cấu hình/rules cá
-nhân và không lưu session. Không sao chép hoặc đưa `~/.codex/auth.json` lên Git,
-Render hay máy khác. Bản Render thường không có Codex CLI và phiên đăng nhập
-ChatGPT local, vì vậy tùy chọn Codex tự khóa còn Gemini API vẫn hoạt động.
+nhân và không lưu session. Không sao chép hoặc đưa `~/.codex/auth.json` lên Git.
+
+Render dùng device-code OAuth trực tiếp trên web (`ROLL_SCALE_CODEX_MODE=oauth`).
+Sau khi chạy migration và deploy lại `ingest-measurement`, bấm `Đăng nhập
+ChatGPT / Codex`, nhập mã trên trang OpenAI rồi xác nhận. Token không được trả
+về browser; backend mã hóa toàn bộ payload bằng Fernet trước khi gửi qua Edge
+Function vào `roll_scale_secrets`. Mặc định khóa được dẫn xuất từ
+`ROLL_SCALE_DEVICE_TOKEN`; nếu đặt `ROLL_SCALE_CODEX_TOKEN_KEY` riêng thì phải
+giữ nguyên khóa đó qua mọi lần deploy. Đây là tích hợp endpoint ChatGPT nội bộ,
+không phải OpenAI API ổn định dành cho production; OpenAI có thể thay đổi luồng
+hoặc giới hạn tài khoản. Khi Codex lỗi, chọn lại Gemini API để tiếp tục vận hành.
 
 ### Đọc cân qua RS232/USB
 

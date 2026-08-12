@@ -29,6 +29,8 @@ from .gemini_weight import (
     GeminiWeightReader,
 )
 from .codex_weight import DEFAULT_CODEX_TIMEOUT_SECONDS, CodexWeightReader
+from .codex_oauth import CodexOAuthClient, EncryptedCodexTokenStore
+from .codex_oauth_weight import CodexOAuthWeightReader
 from .capture_gate import frame_fingerprint
 from .api_client import fetch_supabase_table, persist_product_evidence, sign_storage_image
 from .inference_queue import InferenceCoordinator, InferenceQueueFull
@@ -296,7 +298,7 @@ class StationUIService:
         weight_burst_frames: int = DEFAULT_WEIGHT_BURST_FRAMES,
         gemini_reader: GeminiWeightReader | None = None,
         gemini_accurate_reader: GeminiWeightReader | None = None,
-        codex_reader: CodexWeightReader | None = None,
+        codex_reader: CodexWeightReader | CodexOAuthWeightReader | None = None,
         weight_engine: str = "local",
     ):
         if not 1 <= int(station_count) <= 3:
@@ -1360,7 +1362,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--codex-enabled",
         action=argparse.BooleanOptionalAction,
         default=_env_flag("ROLL_SCALE_CODEX_ENABLED", True),
-        help="Cho phép chọn Codex CLI đã đăng nhập ChatGPT trên máy backend",
+        help="Cho phép chọn Codex/ChatGPT mà không thay thế Gemini API",
+    )
+    parser.add_argument(
+        "--codex-mode",
+        choices=("auto", "cli", "oauth"),
+        default=os.environ.get("ROLL_SCALE_CODEX_MODE", "auto").strip().lower(),
+        help="auto dùng OAuth trên Render và Codex CLI ở máy local",
     )
     parser.add_argument(
         "--codex-command",
@@ -1496,15 +1504,30 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
             media_resolution="high",
             include_qr=False,
         )
-    codex_reader = (
-        CodexWeightReader(
-            args.codex_command,
-            model=args.codex_model,
-            timeout_seconds=args.codex_timeout,
-        )
-        if args.codex_enabled
-        else None
-    )
+    codex_reader: CodexWeightReader | CodexOAuthWeightReader | None = None
+    if args.codex_enabled:
+        codex_mode = args.codex_mode
+        if codex_mode == "auto":
+            codex_mode = "oauth" if os.environ.get("RENDER", "").strip() else "cli"
+        if codex_mode == "oauth":
+            token_store = EncryptedCodexTokenStore(
+                args.api_url,
+                args.api_token,
+                secret_name=f"codex-oauth:{args.gateway_id}",
+                encryption_key=os.environ.get("ROLL_SCALE_CODEX_TOKEN_KEY", ""),
+            )
+            codex_reader = CodexOAuthWeightReader(
+                CodexOAuthClient(token_store, timeout_seconds=min(args.codex_timeout, 30.0)),
+                model=args.codex_model,
+                timeout_seconds=args.codex_timeout,
+                client_version=os.environ.get("ROLL_SCALE_CODEX_CLIENT_VERSION", "0.124.0"),
+            )
+        else:
+            codex_reader = CodexWeightReader(
+                args.codex_command,
+                model=args.codex_model,
+                timeout_seconds=args.codex_timeout,
+            )
     store = MeasurementStore(args.db, args.captures)
     worker = None
     if args.api_url:
@@ -1835,6 +1858,14 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     if service.codex_reader is None:
                         raise ValueError("Codex chưa được bật trên máy backend")
                     self.send_json(200, service.codex_reader.start_device_login())
+                    return
+                if self.path == "/api/codex/login/poll":
+                    if service.codex_reader is None:
+                        raise ValueError("Codex chưa được bật trên máy backend")
+                    poll_login = getattr(service.codex_reader, "poll_device_login", None)
+                    if poll_login is None:
+                        raise ValueError("Chế độ Codex local không dùng đăng nhập web")
+                    self.send_json(200, poll_login(str(payload.get("session_id", ""))))
                     return
                 frame = decode_image(str(payload.get("image", "")))
                 product_frame = (
