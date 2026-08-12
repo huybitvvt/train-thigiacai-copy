@@ -988,7 +988,11 @@ def test_ui_records_table_shows_bi_and_nvl_weights() -> None:
     assert "product-core-bi" in TEST_UI_HTML
     assert 'colspan="9"' in TEST_UI_HTML
     assert 'id="sourceShift"' in TEST_UI_HTML
+    assert 'HC1 · 06:00–14:00' in TEST_UI_HTML
+    assert '12C2 · 18:00–06:00' in TEST_UI_HTML
     assert 'id="sourceMachine"' in TEST_UI_HTML
+    assert 'Máy tái chế' in TEST_UI_HTML
+    assert 'Máy cách nhiệt' in TEST_UI_HTML
     assert 'id="sourceOrder"' in TEST_UI_HTML
     assert 'id="biWeight"' in TEST_UI_HTML
     assert 'value="0.16"' in TEST_UI_HTML
