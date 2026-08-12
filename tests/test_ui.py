@@ -441,6 +441,73 @@ def test_gemini_primary_reads_same_camera_burst_without_paddle(
     assert service.status()["ocr_ready"] is False
 
 
+def test_codex_can_be_selected_without_replacing_gemini(tmp_path) -> None:
+    class FakeGeminiReader:
+        model = "gemini-test"
+
+        def read(self, frames, *, unit):
+            raise AssertionError("Gemini must not run when Codex is selected")
+
+        def status(self):
+            return {"enabled": True, "model": self.model}
+
+        def close(self):
+            pass
+
+    class FakeCodexReader:
+        def read(self, frames, *, unit):
+            return GeminiWeightSuggestion(
+                13.04,
+                unit,
+                True,
+                True,
+                "CODEX:13.04; auth=ChatGPT",
+                0.5,
+            )
+
+        def status(self):
+            return {
+                "enabled": True,
+                "installed": True,
+                "authenticated": True,
+                "available": True,
+            }
+
+        def close(self):
+            pass
+
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    gemini = FakeGeminiReader()
+    codex = FakeCodexReader()
+    service = StationUIService(
+        store,
+        None,
+        None,
+        None,
+        gemini_reader=gemini,
+        codex_reader=codex,
+        weight_engine="gemini",
+    )
+
+    result = service.analyze(
+        make_qr_frame("ROLL-CODEX-001"),
+        "auto",
+        "kg",
+        recognition_provider="codex",
+    )
+    status = service.status()
+    service.close()
+    store.close()
+
+    assert result["weight"] == pytest.approx(13.04)
+    assert result["recognition_provider"] == "codex"
+    assert result["recognition_source"] == "codex-primary"
+    assert result["codex_used"] is True
+    assert result["gemini_used"] is False
+    assert status["recognition_providers"]["gemini"]["available"] is True
+    assert status["recognition_providers"]["codex"]["available"] is True
+
+
 def test_gemini_primary_uses_one_full_image_for_file_and_camera(
     tmp_path,
 ) -> None:
@@ -1034,7 +1101,7 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "PRODUCT_WEIGHT=" in TEST_UI_HTML
     assert "function productReady(session)" in TEST_UI_HTML
     assert "ĐÃ CÂN LÕI · CHỜ CÂN SẢN PHẨM" in TEST_UI_HTML
-    assert "AI đọc " in TEST_UI_HTML
+    assert "recognitionProvider.value==='codex'?'Codex':'AI'" in TEST_UI_HTML
     assert "function showPostCaptureSource(session)" in TEST_UI_HTML
     assert "showPostCaptureSource(session);" in TEST_UI_HTML
     assert "showCapturedBlank" not in TEST_UI_HTML
@@ -1076,6 +1143,10 @@ def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
     assert args.gemini_model == "gemini-3.5-flash-lite"
     assert args.gemini_accurate_model == "gemini-3.1-pro-preview"
     assert args.gemini_accurate_timeout == pytest.approx(30.0)
+    assert args.codex_enabled is True
+    assert args.codex_command == "codex"
+    assert args.codex_model == ""
+    assert args.codex_timeout == pytest.approx(60.0)
     assert args.auto_advance is True
     for marker in (
         'id="stationGrid"',
@@ -1135,8 +1206,13 @@ def test_parser_auto_selects_gemini_only_when_key_exists_and_engine_is_omitted(
 
 def test_ui_does_not_offer_fake_gemini_profile_when_backend_is_local() -> None:
     assert 'id="recognitionProfileOption"' in TEST_UI_HTML
-    assert "$('recognitionProfileOption').hidden=!primary" in TEST_UI_HTML
-    assert "recognitionProfile.disabled=!geminiPrimary" in TEST_UI_HTML
+    assert 'id="recognitionProvider"' in TEST_UI_HTML
+    assert '<option value="gemini">Gemini API</option>' in TEST_UI_HTML
+    assert '<option value="codex">Codex · ChatGPT</option>' in TEST_UI_HTML
+    assert "$('recognitionProviderOption').hidden=!primary" in TEST_UI_HTML
+    assert "recognitionProvider.disabled=!geminiPrimary" in TEST_UI_HTML
+    assert "recognition_provider:recognitionProvider.value" in TEST_UI_HTML
+    assert "'/api/codex/login'" in TEST_UI_HTML
     assert "BACKEND ĐANG DÙNG OCR LOCAL" in TEST_UI_HTML
 
 

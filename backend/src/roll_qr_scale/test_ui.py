@@ -28,6 +28,7 @@ from .gemini_weight import (
     DEFAULT_GEMINI_TIMEOUT_SECONDS,
     GeminiWeightReader,
 )
+from .codex_weight import DEFAULT_CODEX_TIMEOUT_SECONDS, CodexWeightReader
 from .capture_gate import frame_fingerprint
 from .api_client import fetch_supabase_table, persist_product_evidence, sign_storage_image
 from .inference_queue import InferenceCoordinator, InferenceQueueFull
@@ -62,6 +63,7 @@ DEFAULT_WEIGHT_BURST_FRAMES = 5
 UNITS = {"kg", "g", "lb"}
 WEIGHT_ENGINES = {"local", "hybrid", "gemini"}
 GEMINI_RECOGNITION_PROFILES = {"fast", "accurate"}
+AI_RECOGNITION_PROVIDERS = {"gemini", "codex"}
 
 
 def _supabase_project_url() -> str:
@@ -294,6 +296,7 @@ class StationUIService:
         weight_burst_frames: int = DEFAULT_WEIGHT_BURST_FRAMES,
         gemini_reader: GeminiWeightReader | None = None,
         gemini_accurate_reader: GeminiWeightReader | None = None,
+        codex_reader: CodexWeightReader | None = None,
         weight_engine: str = "local",
     ):
         if not 1 <= int(station_count) <= 3:
@@ -334,6 +337,7 @@ class StationUIService:
         self.weight_burst_frames = int(weight_burst_frames)
         self.gemini_reader = gemini_reader
         self.gemini_accurate_reader = gemini_accurate_reader
+        self.codex_reader = codex_reader
         self.weight_engine = weight_engine
         self.weight_rois: dict[str, NormalizedROI] = {
             station_id: roi
@@ -407,6 +411,8 @@ class StationUIService:
             and self.gemini_accurate_reader is not self.gemini_reader
         ):
             self.gemini_accurate_reader.close()
+        if self.codex_reader is not None:
+            self.codex_reader.close()
 
     @staticmethod
     def _reader_model(reader: GeminiWeightReader | None) -> str | None:
@@ -472,6 +478,26 @@ class StationUIService:
                 if self.gemini_reader is not None
                 else {"enabled": False}
             ),
+            "codex": (
+                self.codex_reader.status()
+                if self.codex_reader is not None
+                else {
+                    "enabled": False,
+                    "installed": False,
+                    "authenticated": False,
+                    "available": False,
+                }
+            ),
+            "recognition_providers": {
+                "default": "gemini",
+                "gemini": {"available": self.gemini_reader is not None},
+                "codex": {
+                    "available": bool(
+                        self.codex_reader is not None
+                        and self.codex_reader.status().get("available")
+                    )
+                },
+            },
             "recognition_profiles": {
                 "default": "fast",
                 "fast": {
@@ -592,6 +618,7 @@ class StationUIService:
         weight_frames: list[np.ndarray] | None = None,
         roi_method_override: str | None = None,
         recognition_profile: str = "fast",
+        recognition_provider: str = "gemini",
         capture_kind: str = "",
         client_qr_code: str = "",
     ) -> dict[str, object]:
@@ -599,6 +626,9 @@ class StationUIService:
             raise ValueError("Đơn vị không hợp lệ")
         if recognition_profile not in GEMINI_RECOGNITION_PROFILES:
             raise ValueError("Chế độ nhận diện phải là fast hoặc accurate")
+        recognition_provider = recognition_provider.strip().lower()
+        if recognition_provider not in AI_RECOGNITION_PROVIDERS:
+            raise ValueError("Bộ AI nhận diện phải là gemini hoặc codex")
         if capture_kind not in {"", "core", "product"}:
             raise ValueError("capture_kind phải là core hoặc product")
         quality = self.assess_quality(frame)
@@ -633,21 +663,22 @@ class StationUIService:
         auto_roi = roi_text.strip().lower() in {"", "auto"}
         roi: NormalizedROI | None
         if self.weight_engine == "gemini":
+            provider_prefix = recognition_provider
             optimized_capture = capture_kind in {"core", "product"}
             if not optimized_capture:
                 roi = None
-                roi_method = "gemini-full-frame"
+                roi_method = f"{provider_prefix}-full-frame"
             elif auto_roi:
                 located = detect_weight_roi(frame)
                 if located is None:
                     roi = None
-                    roi_method = "gemini-full-frame-fallback"
+                    roi_method = f"{provider_prefix}-full-frame-fallback"
                 else:
                     roi, detected_method = located
-                    roi_method = f"gemini-crop-{detected_method}"
+                    roi_method = f"{provider_prefix}-crop-{detected_method}"
             else:
                 roi = parse_normalized_roi(roi_text)
-                roi_method = roi_method_override or "gemini-crop-manual"
+                roi_method = roi_method_override or f"{provider_prefix}-crop-manual"
         elif auto_roi:
             located = (
                 detect_weight_roi_consensus(frames)
@@ -688,6 +719,7 @@ class StationUIService:
 
         local_candidate: WeightReading | None = None
         gemini_used = self.weight_engine == "gemini"
+        codex_used = False
         gemini_suggestion: float | None = None
         gemini_latency_seconds: float | None = None
         gemini_input_tokens: int | None = None
@@ -698,21 +730,33 @@ class StationUIService:
         gemini_fallback_used = False
         requires_human_review = False
         if self.weight_engine == "gemini":
-            selected_gemini_reader = self._gemini_reader_for(recognition_profile)
+            if recognition_provider == "codex":
+                if self.codex_reader is None:
+                    raise ValueError("Codex chưa được bật trên máy backend")
+                codex_status = self.codex_reader.status()
+                if not codex_status.get("available"):
+                    raise ValueError(str(codex_status.get("message") or "Codex chưa đăng nhập"))
+                selected_ai_reader = self.codex_reader
+                gemini_used = False
+                codex_used = True
+            else:
+                selected_ai_reader = self._gemini_reader_for(recognition_profile)
+            provider_label = "CODEX" if codex_used else "GEMINI"
+            provider_source = "codex-primary" if codex_used else "gemini-primary"
             single_image_request = len(frames) == 1
-            gemini_frames = [frame] if single_image_request else frames
+            ai_frames = [frame] if single_image_request else frames
             if capture_kind in {"core", "product"} and roi is not None:
-                gemini_frames = [self._gemini_crop(item, roi) for item in gemini_frames]
-            if len(gemini_frames) == 2:
+                ai_frames = [self._gemini_crop(item, roi) for item in ai_frames]
+            if len(ai_frames) == 2:
                 reading = WeightReading(
                     None,
                     unit,
                     False,
-                    "GEMINI PRIMARY: cần ít nhất 3 frame camera mới",
+                    f"{provider_label} PRIMARY: cần ít nhất 3 frame camera mới",
                 )
                 recognition_source = "none"
             else:
-                suggestion = selected_gemini_reader.read(gemini_frames, unit=unit)
+                suggestion = selected_ai_reader.read(ai_frames, unit=unit)
                 gemini_attempts = 1
                 suggestion_raw = suggestion.raw
                 suggestions = [suggestion]
@@ -725,9 +769,9 @@ class StationUIService:
                 if (
                     crop_was_used
                     and suggestion.value is None
-                    and not suggestion.raw.startswith("GEMINI ERROR:")
+                    and not suggestion.raw.startswith(f"{provider_label} ERROR:")
                 ):
-                    fallback = selected_gemini_reader.read(frames, unit=unit)
+                    fallback = selected_ai_reader.read(frames, unit=unit)
                     suggestions.append(fallback)
                     gemini_attempts = 2
                     gemini_fallback_used = True
@@ -769,7 +813,7 @@ class StationUIService:
                         None,
                         unit,
                         False,
-                        f"{suggestion_raw}{qr_note}; GEMINI PRIMARY: rejected",
+                        f"{suggestion_raw}{qr_note}; {provider_label} PRIMARY: rejected",
                     )
                     recognition_source = "none"
                 else:
@@ -778,12 +822,12 @@ class StationUIService:
                         suggestion.unit,
                         True,
                         (
-                            f"{suggestion_raw}{qr_note}; GEMINI PRIMARY: single full-image accepted"
+                            f"{suggestion_raw}{qr_note}; {provider_label} PRIMARY: single full-image accepted"
                             if single_image_request
-                            else f"{suggestion_raw}{qr_note}; GEMINI PRIMARY: 3-frame schema accepted"
+                            else f"{suggestion_raw}{qr_note}; {provider_label} PRIMARY: 3-frame schema accepted"
                         ),
                     )
-                    recognition_source = "gemini-primary"
+                    recognition_source = provider_source
         else:
             with self._ocr_lock:
                 weight_source = CameraOCRWeightSource(
@@ -866,12 +910,14 @@ class StationUIService:
             "weight_raw": reading.raw,
             "recognition_source": recognition_source,
             "recognition_profile": recognition_profile,
+            "recognition_provider": recognition_provider,
             "local_candidate": (
                 local_candidate.value
                 if local_candidate is not None
                 else None
             ),
             "gemini_used": gemini_used,
+            "codex_used": codex_used,
             "gemini_suggestion": gemini_suggestion,
             "gemini_latency_seconds": gemini_latency_seconds,
             "gemini_input_tokens": gemini_input_tokens,
@@ -880,10 +926,18 @@ class StationUIService:
             "gemini_total_tokens": gemini_total_tokens,
             "gemini_attempts": gemini_attempts,
             "gemini_fallback_used": gemini_fallback_used,
+            "ai_latency_seconds": gemini_latency_seconds,
+            "ai_attempts": gemini_attempts,
+            "ai_fallback_used": gemini_fallback_used,
             "requires_human_review": requires_human_review,
             "roi": self._roi_text(roi) if roi is not None else None,
             "roi_method": roi_method,
             "gemini_crop_applied": bool(
+                self.weight_engine == "gemini"
+                and capture_kind in {"core", "product"}
+                and roi is not None
+            ),
+            "ai_crop_applied": bool(
                 self.weight_engine == "gemini"
                 and capture_kind in {"core", "product"}
                 and roi is not None
@@ -905,6 +959,7 @@ class StationUIService:
         weight_frames: list[np.ndarray] | None = None,
         require_temporal: bool = False,
         recognition_profile: str = "fast",
+        recognition_provider: str = "gemini",
         capture_kind: str = "",
         client_qr_code: str = "",
         context_station_id: str | None = None,
@@ -943,6 +998,7 @@ class StationUIService:
                 additional_frames,
                 roi_method_override,
                 recognition_profile,
+                recognition_provider,
                 capture_kind,
                 client_qr_code,
             )
@@ -965,6 +1021,7 @@ class StationUIService:
                 additional_frames,
                 roi_method_override,
                 recognition_profile,
+                recognition_provider,
                 capture_kind,
                 client_qr_code,
             )
@@ -1300,6 +1357,31 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--codex-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_env_flag("ROLL_SCALE_CODEX_ENABLED", True),
+        help="Cho phép chọn Codex CLI đã đăng nhập ChatGPT trên máy backend",
+    )
+    parser.add_argument(
+        "--codex-command",
+        default=os.environ.get("ROLL_SCALE_CODEX_COMMAND", "codex"),
+    )
+    parser.add_argument(
+        "--codex-model",
+        default=os.environ.get("ROLL_SCALE_CODEX_MODEL", ""),
+        help="Để trống để Codex dùng model mặc định của tài khoản ChatGPT",
+    )
+    parser.add_argument(
+        "--codex-timeout",
+        type=float,
+        default=float(
+            os.environ.get(
+                "ROLL_SCALE_CODEX_TIMEOUT",
+                str(DEFAULT_CODEX_TIMEOUT_SECONDS),
+            )
+        ),
+    )
+    parser.add_argument(
         "--diagnostic-image",
         default=os.environ.get("ROLL_SCALE_DIAGNOSTIC_IMAGE"),
         help="Ghi đè ảnh phân tích gần nhất để hiệu chỉnh OCR tại xưởng",
@@ -1414,6 +1496,15 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
             media_resolution="high",
             include_qr=False,
         )
+    codex_reader = (
+        CodexWeightReader(
+            args.codex_command,
+            model=args.codex_model,
+            timeout_seconds=args.codex_timeout,
+        )
+        if args.codex_enabled
+        else None
+    )
     store = MeasurementStore(args.db, args.captures)
     worker = None
     if args.api_url:
@@ -1446,6 +1537,7 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
         weight_burst_frames=args.weight_burst_frames,
         gemini_reader=gemini_reader,
         gemini_accurate_reader=gemini_accurate_reader,
+        codex_reader=codex_reader,
         weight_engine=weight_engine,
     )
     demo_path = Path(args.demo_image)
@@ -1739,6 +1831,11 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     )
                     self.send_json(200, {"ok": True, "discarded": discarded})
                     return
+                if self.path == "/api/codex/login":
+                    if service.codex_reader is None:
+                        raise ValueError("Codex chưa được bật trên máy backend")
+                    self.send_json(200, service.codex_reader.start_device_login())
+                    return
                 frame = decode_image(str(payload.get("image", "")))
                 product_frame = (
                     decode_image(str(payload.get("product_image", "")))
@@ -1775,6 +1872,7 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         weight_frames=weight_frames,
                         require_temporal=bool(payload.get("camera_capture", False)),
                         recognition_profile=str(payload.get("recognition_profile", "fast")),
+                        recognition_provider=str(payload.get("recognition_provider", "gemini")),
                         capture_kind=capture_kind,
                         client_qr_code=str(payload.get("client_qr_code", "")),
                         context_station_id=str(payload.get("station_id", "")) or None,

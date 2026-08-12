@@ -273,6 +273,26 @@ Luồng hybrid chấp nhận theo kiểu fail-closed:
 
 Ngưỡng OCR `0.60` chỉ là cổng loại kết quả Paddle quá yếu, không phải xác suất hệ thống đúng 60%. Điều kiện quyết định chính là đồng thuận số tuyệt đối qua các frame. Free tier/quota và đơn giá Gemini có thể thay đổi. Ảnh camera vẫn được xử lý qua dịch vụ cloud khi bật Gemini, nên chỉ bật sau khi khách hàng chấp thuận chính sách dữ liệu và không coi cloud là phụ thuộc bắt buộc.
 
+### Codex đăng nhập ChatGPT (chỉ máy local)
+
+Gemini API vẫn là lựa chọn mặc định. Trên máy chạy backend có cài Codex CLI,
+đăng nhập một lần rồi khởi động lại UI:
+
+```powershell
+codex login --device-auth
+codex login status
+$env:ROLL_SCALE_WEIGHT_ENGINE = "gemini"
+$env:ROLL_SCALE_CODEX_ENABLED = "true"
+.\.venv\Scripts\roll-test-ui.exe
+```
+
+Trong giao diện chọn `AI -> Codex · ChatGPT`; có thể đổi lại `Gemini API` bất
+cứ lúc nào. Codex chỉ đọc ảnh cân, còn QR vẫn do bộ giải mã QR độc lập xử lý.
+Mỗi lần gọi dùng thư mục tạm, sandbox read-only, không nạp cấu hình/rules cá
+nhân và không lưu session. Không sao chép hoặc đưa `~/.codex/auth.json` lên Git,
+Render hay máy khác. Bản Render thường không có Codex CLI và phiên đăng nhập
+ChatGPT local, vì vậy tùy chọn Codex tự khóa còn Gemini API vẫn hoạt động.
+
 ### Đọc cân qua RS232/USB
 
 Phương án production ưu tiên: đầu đọc QR USB HID, cân ở `COM3`, camera bằng chứng số 0. Cấu hình scanner tự gửi phím `Enter` sau mỗi mã:
