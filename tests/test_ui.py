@@ -1223,6 +1223,12 @@ def test_ui_does_not_offer_fake_gemini_profile_when_backend_is_local() -> None:
     assert "BACKEND ĐANG DÙNG OCR LOCAL" in TEST_UI_HTML
 
 
+def test_gemini_key_store_uses_supabase_legacy_compatible_action() -> None:
+    source = Path(test_ui_module.__file__).read_text(encoding="utf-8")
+    assert 'secret_name=f"gemini-api-key:{args.gateway_id}"' in source
+    assert 'secret_action="codex-auth"' in source
+
+
 def test_frozen_ui_does_not_auto_load_workspace_yolo_model(monkeypatch, tmp_path) -> None:
     monkeypatch.chdir(tmp_path)
     model = tmp_path / "models" / "qr_demo_synthetic.pt"

@@ -1513,7 +1513,10 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
             args.api_url,
             args.api_token,
             secret_name=f"gemini-api-key:{args.gateway_id}",
-            secret_action="encrypted-secret",
+            # Keep the legacy action name so already-deployed Supabase Functions
+            # can store any encrypted secret by its distinct name. New Functions
+            # accept this action too.
+            secret_action="codex-auth",
             encryption_key=os.environ.get("ROLL_SCALE_GEMINI_KEY_ENCRYPTION_KEY", "")
             or os.environ.get("ROLL_SCALE_CODEX_TOKEN_KEY", ""),
         )

@@ -213,7 +213,7 @@ class EncryptedCodexTokenStore:
             timeout=self.timeout_seconds,
         )
         if not result.get("ok"):
-            raise CodexOAuthError("Supabase không lưu được đăng nhập Codex")
+            raise CodexOAuthError("Supabase không lưu được bí mật đã mã hóa")
 
 
 @dataclass

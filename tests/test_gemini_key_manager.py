@@ -90,11 +90,11 @@ def test_replace_keeps_new_readers_out_when_store_fails(monkeypatch) -> None:
     assert all(item.closed for item in created)
 
 
-def test_gemini_store_uses_generic_encrypted_secret_action() -> None:
+def test_gemini_store_uses_legacy_compatible_encrypted_secret_action() -> None:
     store = EncryptedCodexTokenStore(
         "https://example.invalid/ingest",
         "device-token",
         secret_name="gemini-api-key:gateway-01",
-        secret_action="encrypted-secret",
+        secret_action="codex-auth",
     )
-    assert store.secret_action == "encrypted-secret"
+    assert store.secret_action == "codex-auth"
