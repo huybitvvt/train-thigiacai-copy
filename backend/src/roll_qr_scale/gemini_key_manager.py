@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import threading
 from typing import Callable
 
@@ -30,19 +31,29 @@ class GeminiKeyManager:
         self.reader_factory = reader_factory
         self._lock = threading.RLock()
         self._source = "environment" if self.initial_key else "none"
+        self._key_id = self.key_id(self.initial_key) if self.initial_key else ""
         self._last_error = ""
+
+    @staticmethod
+    def key_id(api_key: str) -> str:
+        """Return a safe short identifier without exposing any part of the key."""
+        value = api_key.strip()
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()[:10] if value else ""
 
     def load_key(self) -> str:
         if self.store.configured:
             try:
                 saved = self.store.read()
                 if saved and str(saved.get("api_key") or "").strip():
+                    value = str(saved["api_key"]).strip()
                     self._source = "supabase-encrypted"
+                    self._key_id = self.key_id(value)
                     self._last_error = ""
-                    return str(saved["api_key"]).strip()
+                    return value
             except Exception as exc:
                 self._last_error = f"{type(exc).__name__}: {str(exc).strip()}"[:300]
         self._source = "environment" if self.initial_key else "none"
+        self._key_id = self.key_id(self.initial_key)
         return self.initial_key
 
     def create_readers(self, api_key: str) -> tuple[GeminiWeightReader, GeminiWeightReader]:
@@ -109,6 +120,7 @@ class GeminiKeyManager:
             raise
         with self._lock:
             self._source = "supabase-encrypted"
+            self._key_id = self.key_id(value)
             self._last_error = ""
         return readers
 
@@ -117,6 +129,7 @@ class GeminiKeyManager:
             return {
                 "change_enabled": self.store.configured,
                 "source": self._source,
+                "key_id": self._key_id or None,
                 "stored_encrypted": self._source == "supabase-encrypted",
                 "last_error": self._last_error or None,
                 "message": self.store.config_error if not self.store.configured else "Sẵn sàng đổi Gemini API key",

@@ -461,6 +461,7 @@ class StationUIService:
             "ok": True,
             "changed": True,
             "stored_encrypted": True,
+            "key_id": self.gemini_key_manager.key_id(api_key),
             "message": "Đã kiểm tra, mã hóa và áp dụng Gemini API key mới",
         }
 

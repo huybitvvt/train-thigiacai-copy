@@ -1217,6 +1217,8 @@ def test_ui_does_not_offer_fake_gemini_profile_when_backend_is_local() -> None:
     assert "'/api/gemini/key'" in TEST_UI_HTML
     assert 'id="geminiKeyBtn"' in TEST_UI_HTML
     assert 'id="geminiApiKeyInput" type="password"' in TEST_UI_HTML
+    assert 'id="geminiKeyStatus"' in TEST_UI_HTML
+    assert "ĐỔI GEMINI KEY THÀNH CÔNG" in TEST_UI_HTML
     assert "window.open('about:blank'" not in TEST_UI_HTML
     assert "BACKEND ĐANG DÙNG OCR LOCAL" in TEST_UI_HTML
 

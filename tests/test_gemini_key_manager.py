@@ -51,6 +51,7 @@ def test_load_prefers_encrypted_supabase_key() -> None:
     current = manager(MemoryStore({"api_key": "stored-key-value-123456"}))
     assert current.load_key() == "stored-key-value-123456"
     assert current.status()["source"] == "supabase-encrypted"
+    assert current.status()["key_id"] == current.key_id("stored-key-value-123456")
 
 
 def test_load_falls_back_to_environment_when_supabase_is_temporarily_down() -> None:
@@ -69,6 +70,7 @@ def test_replace_validates_before_persisting_and_creates_both_readers(monkeypatc
     assert fast.kwargs["model"] == "fast-model"
     assert accurate.kwargs["model"] == "accurate-model"
     assert current.status()["stored_encrypted"] is True
+    assert current.status()["key_id"] == current.key_id("new-key-value-123456789")
 
 
 def test_replace_keeps_new_readers_out_when_store_fails(monkeypatch) -> None:
