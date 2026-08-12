@@ -980,7 +980,13 @@ def test_ui_uses_camera_left_params_right_capture_layout() -> None:
     assert "main{width:100%" in TEST_UI_HTML
 
 
-def test_ui_has_shift_machine_production_order_fields() -> None:
+def test_ui_records_table_shows_bi_and_nvl_weights() -> None:
+    assert "Trọng lượng bì" in TEST_UI_HTML
+    assert "Trọng lượng NVL" in TEST_UI_HTML
+    assert "function biWeightFromRaw(" in TEST_UI_HTML
+    assert "function nvlWeight(" in TEST_UI_HTML
+    assert "product-core-bi" in TEST_UI_HTML
+    assert 'colspan="9"' in TEST_UI_HTML
     assert 'id="sourceShift"' in TEST_UI_HTML
     assert 'id="sourceMachine"' in TEST_UI_HTML
     assert 'id="sourceOrder"' in TEST_UI_HTML
