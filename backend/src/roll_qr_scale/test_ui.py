@@ -591,6 +591,28 @@ class StationUIService:
             )
         return {"image_path": str(image_path.resolve()), "metadata_path": str(metadata_path.resolve())}
 
+    def _cleanup_evidence_steps(self, station_id: str, event_id: str) -> None:
+        """Remove transient two-step evidence after save or operator discard."""
+        station_id = str(station_id).strip()
+        if station_id not in {str(item["station_id"]) for item in self.station_configs}:
+            return
+        try:
+            uuid.UUID(str(event_id))
+        except (ValueError, TypeError, AttributeError):
+            return
+        folder = self.sessions.staging_dir / station_id
+        for suffix in ("_core.jpg", "_product.jpg", "_steps.json"):
+            try:
+                (folder / f"{event_id}{suffix}").unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def discard_session(self, station_id: str, *, event_id: str | None = None) -> bool:
+        discarded = self.sessions.discard(station_id, event_id=event_id)
+        if event_id:
+            self._cleanup_evidence_steps(station_id, event_id)
+        return discarded
+
     def diagnostic_path_for(self, station_id: str) -> Path | None:
         if self.diagnostic_image is None:
             return None
@@ -665,7 +687,19 @@ class StationUIService:
             raise ValueError("capture_kind phải là core hoặc product")
         quality = self.assess_quality(frame)
         quality_payload, quality_pass = self.quality_result(quality)
-        decoded = self._decode_qr(frame)
+        # QR belongs to the product step. Avoid spending CPU decoding unrelated
+        # pixels while the operator is capturing the core weight.
+        decoded = (
+            {
+                "ok": True,
+                "found": False,
+                "qr_code": None,
+                "decoder": "not-requested-core-step",
+                "qr_roi": None,
+            }
+            if capture_kind == "core"
+            else self._decode_qr(frame)
+        )
         client_qr = client_qr_code.strip()
         if len(client_qr) > 512 or any(ord(character) < 32 for character in client_qr):
             raise ValueError("Mã QR từ trình duyệt không hợp lệ")
@@ -1188,6 +1222,8 @@ class StationUIService:
         if product_frame is not None:
             self.store.attach_product_image(measurement.event_id, product_frame)
             measurement = self.store.get(measurement.event_id) or measurement
+        if bound_capture and station_id:
+            self._cleanup_evidence_steps(station_id, measurement.event_id)
         # Commit locally first, then synchronously confirm this exact event so
         # one operator click sends the product code, core weight and evidence
         # image together. A failed cloud attempt remains durable in the outbox.
@@ -1682,7 +1718,13 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
         def do_GET(self) -> None:
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path == "/api/health":
-                self.send_json(200, {"ok": True})
+                self.send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "release": os.environ.get("RENDER_GIT_COMMIT", "local")[:12],
+                    },
+                )
                 return
             if not self.require_authorization():
                 return
@@ -1739,6 +1781,7 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         "ocr_min_confidence": service.ocr_min_confidence,
                         "sync_enabled": service.sync_worker is not None,
                         "image_provider": "cloudinary" if service.sync_worker is not None else "local",
+                        "release": os.environ.get("RENDER_GIT_COMMIT", "local")[:12],
                         "quality_settings": service.quality_settings,
                         **identity_status,
                     },
@@ -1811,7 +1854,7 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     core_url = item.get("core_image_url") or item.get("image_url")
                     product_url = item.get("product_image_url")
                     product_path = item.get("product_image_path")
-                    if isinstance(product_path, str) and product_path:
+                    if not product_url and isinstance(product_path, str) and product_path:
                         try:
                             product_url = sign_storage_image(
                                 supabase_url,
@@ -1899,7 +1942,7 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
             try:
                 payload = self.read_json()
                 if self.path == "/api/session/discard":
-                    discarded = service.sessions.discard(
+                    discarded = service.discard_session(
                         str(payload.get("station_id", "")),
                         event_id=str(payload["event_id"]) if payload.get("event_id") else None,
                     )

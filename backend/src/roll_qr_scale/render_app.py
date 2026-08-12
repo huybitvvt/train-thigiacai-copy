@@ -6,12 +6,19 @@ from pathlib import Path
 from .test_ui import build_parser, run
 
 
+RENDER_DISK_ROOT = Path("/var/data")
+
+
 def _csv_env(name: str) -> list[str]:
     return [item.strip() for item in os.environ.get(name, "").split(",") if item.strip()]
 
 
 def build_render_argv() -> list[str]:
-    data_root = Path(os.environ.get("ROLL_SCALE_DATA_ROOT", "/tmp/tram-can-qr"))
+    configured_root = os.environ.get("ROLL_SCALE_DATA_ROOT", "").strip()
+    data_root = Path(
+        configured_root
+        or (RENDER_DISK_ROOT if RENDER_DISK_ROOT.is_dir() else "/tmp/tram-can-qr")
+    )
     data_root.mkdir(parents=True, exist_ok=True)
     port = int(os.environ.get("PORT", "10000"))
     station_count = int(os.environ.get("ROLL_SCALE_STATION_COUNT", "1"))

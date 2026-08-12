@@ -58,10 +58,9 @@ class OutboxSyncWorker:
 
     def _run(self) -> None:
         while not self._stop.is_set():
-            # A failed event is only retried by an explicit/manual action.
-            # New captures are sent synchronously by sync_event after the
-            # operator presses LƯU, so historical failures must not leak later.
-            self.sync_once(retry_failed=False)
+            # Failed uploads stay in the durable outbox with exponential
+            # backoff. Event IDs make retries idempotent at the cloud boundary.
+            self.sync_once(retry_failed=True)
             self._wake.wait(self.interval)
             self._wake.clear()
 

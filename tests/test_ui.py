@@ -738,6 +738,47 @@ def test_render_capture_crops_detected_led_before_gemini(tmp_path, monkeypatch) 
     assert result["roi_method"] == "gemini-crop-red-led"
 
 
+def test_core_capture_skips_unrelated_qr_decode(tmp_path, monkeypatch) -> None:
+    class FakeGeminiReader:
+        def read(self, frames, *, unit):
+            return GeminiWeightSuggestion(7.02, unit, True, True, "GEMINI:test", 0.1)
+
+        def status(self):
+            return {"enabled": True}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(test_ui_module, "detect_weight_roi", lambda frame: None)
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(
+        store,
+        None,
+        None,
+        None,
+        gemini_reader=FakeGeminiReader(),
+        weight_engine="gemini",
+    )
+    monkeypatch.setattr(
+        service,
+        "_decode_qr",
+        lambda frame: (_ for _ in ()).throw(AssertionError("core must not decode QR")),
+    )
+
+    result = service.analyze(
+        np.full((600, 800, 3), 180, dtype=np.uint8),
+        "auto",
+        "kg",
+        capture_kind="core",
+    )
+
+    service.close()
+    store.close()
+    assert result["weight"] == pytest.approx(7.02)
+    assert result["qr_found"] is False
+    assert result["qr_decoder"] == "not-requested-core-step"
+
+
 def test_unreadable_gemini_crop_retries_one_full_frame(tmp_path, monkeypatch) -> None:
     class FakeGeminiReader:
         def __init__(self):
@@ -1068,7 +1109,6 @@ def test_ui_records_table_shows_bi_and_nvl_weights() -> None:
     assert "BI_WEIGHT=" in TEST_UI_HTML
     assert "production_order:sourceContext.order" in TEST_UI_HTML
     from roll_qr_scale.test_ui import _merge_source_tags
-
     merged = _merge_source_tags(
         "PRODUCT_WEIGHT=1.2",
         {
@@ -1085,14 +1125,23 @@ def test_ui_records_table_shows_bi_and_nvl_weights() -> None:
     assert "BI_WEIGHT=0.16" in merged
 
 
+def test_remote_product_image_does_not_request_redundant_signed_url() -> None:
+    source = Path(test_ui_module.__file__).read_text(encoding="utf-8")
+    assert "if not product_url and isinstance(product_path, str) and product_path:" in source
+
+
 def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "session.qr=data.qr_code||''" not in TEST_UI_HTML
     assert "if(isProduct){session.productAnalysis=data" in TEST_UI_HTML
     assert "reliableQr=Boolean(data.qr_found&&!data.qr_conflict&&!qrDecoder.startsWith('gemini'))" in TEST_UI_HTML
     assert "if(reliableQr&&String(data.qr_code||'').trim()&&!String(session.qr||'').trim())session.qr=String(data.qr_code).trim()" in TEST_UI_HTML
-    assert "$('analyzeProductBtn').disabled=busy||!coreCaptured(session)" in TEST_UI_HTML
+    assert "$('analyzeProductBtn').disabled=busy||!ready||!coreReady(session)" in TEST_UI_HTML
     assert "function coreCaptured(session)" in TEST_UI_HTML
-    assert "if(isProduct&&!coreCaptured(session))" in TEST_UI_HTML
+    assert "function sourceReady(session)" in TEST_UI_HTML
+    assert "if(isProduct&&!coreReady(session))" in TEST_UI_HTML
+    assert "session._analyzeLock=false;renderControls();status(captureStatus,error.message" in TEST_UI_HTML
+    assert "if(eventId){await api('/api/session/discard'" in TEST_UI_HTML
+    assert "if(!isProduct&&session.coreAnalysis&&session.analysisId)" in TEST_UI_HTML
     assert 'id="analyzeCoreBtn"' in TEST_UI_HTML
     assert 'id="analyzeProductBtn"' in TEST_UI_HTML
     assert 'id="productWeight"' in TEST_UI_HTML
@@ -1107,9 +1156,12 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "showCapturedBlank" not in TEST_UI_HTML
     assert "function cameraVideoConstraints()" in TEST_UI_HTML
     assert "function tuneCameraTrack(track)" in TEST_UI_HTML
+    assert "initialCameraPermissionCheck&&stations.some(session=>session.deviceId)" in TEST_UI_HTML
     assert "function decodeClientQr(canvas)" in TEST_UI_HTML
     assert "client_qr_code:clientQr" in TEST_UI_HTML
     assert "CAPTURE_MAX_EDGE=1440" in TEST_UI_HTML
+    assert "setInterval(loadRecords,15000)" in TEST_UI_HTML
+    assert "appStatus.release||'local'" in TEST_UI_HTML
 
 
 def test_ui_enables_local_yolo_model_by_default(monkeypatch, tmp_path) -> None:
@@ -1171,6 +1223,7 @@ def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
         "'awaiting-code'",
         "'awaiting-weight'",
         "function completionReady(session)",
+        "function sourceReady(session)",
         "function productReady(session)",
         "ĐÃ CÂN LÕI · CHỜ CÂN SẢN PHẨM",
         'id="analyzeCoreBtn"',
@@ -1276,7 +1329,34 @@ def test_bound_capture_is_idempotent_and_keeps_analysis_id(tmp_path, monkeypatch
         camera_id="camera-01",
         frame_sha256=str(analysis["frame_sha256"]),
     )
-    first = service.capture("ROLL-BOUND-001", 20.15, "kg", frame, True, "OCR", **kwargs)
+    staged_core = service.stage_evidence_step(
+        frame,
+        event_id=event_id,
+        station_id="station-01",
+        kind="core",
+        weight=20.15,
+        unit="kg",
+    )
+    staged_product = service.stage_evidence_step(
+        frame,
+        event_id=event_id,
+        station_id="station-01",
+        kind="product",
+        weight=21.15,
+        unit="kg",
+        qr_code="ROLL-BOUND-001",
+    )
+    first = service.capture(
+        "ROLL-BOUND-001",
+        20.15,
+        "kg",
+        frame,
+        True,
+        "OCR",
+        product_frame=frame,
+        product_weight=21.15,
+        **kwargs,
+    )
     retry = service.capture("ROLL-BOUND-001", 20.15, "kg", frame, True, "OCR", **kwargs)
     row = store.get(event_id)
     service.close()
@@ -1290,6 +1370,44 @@ def test_bound_capture_is_idempotent_and_keeps_analysis_id(tmp_path, monkeypatch
     assert first["camera_id"] == "camera-01"
     assert first["frame_sha256"] == analysis["frame_sha256"]
     assert row is not None and row.captured_at == analysis["captured_at"]
+    assert not Path(str(staged_core["image_path"])).exists()
+    assert not Path(str(staged_product["image_path"])).exists()
+    assert not Path(str(staged_product["metadata_path"])).exists()
+
+
+def test_discard_session_removes_transient_step_evidence(tmp_path) -> None:
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(
+        store,
+        None,
+        None,
+        None,
+        station_count=1,
+        station_ids=["station-01"],
+        camera_ids=["camera-01"],
+    )
+    event_id = str(uuid.uuid4())
+    frame = make_qr_frame("ROLL-DISCARD-001")
+    service.sessions.stage(
+        frame,
+        event_id=event_id,
+        station_id="station-01",
+        camera_id="camera-01",
+    )
+    staged = service.stage_evidence_step(
+        frame,
+        event_id=event_id,
+        station_id="station-01",
+        kind="core",
+        weight=13.04,
+        unit="kg",
+    )
+
+    assert service.discard_session("station-01", event_id=event_id) is True
+    service.close()
+    store.close()
+    assert not Path(str(staged["image_path"])).exists()
+    assert not Path(str(staged["metadata_path"])).exists()
 
 
 def test_service_rejects_duplicate_logical_camera_ids(tmp_path) -> None:

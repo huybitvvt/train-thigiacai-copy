@@ -161,6 +161,26 @@ def test_outbox_keeps_failed_event_for_retry(tmp_path) -> None:
     store.close()
 
 
+def test_background_worker_includes_failed_events_for_scheduled_retry(tmp_path) -> None:
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    worker = OutboxSyncWorker(store, "https://example.test", "token", interval=0.01)
+    called = threading.Event()
+    retry_flags: list[bool] = []
+
+    def observe(*args, **kwargs):
+        retry_flags.append(bool(kwargs.get("retry_failed")))
+        called.set()
+        return 0
+
+    worker.sync_once = observe  # type: ignore[method-assign]
+    worker.start()
+    assert called.wait(1.0)
+    worker.stop()
+    store.close()
+
+    assert retry_flags and retry_flags[0] is True
+
+
 @pytest.mark.parametrize(
     "response_factory",
     [

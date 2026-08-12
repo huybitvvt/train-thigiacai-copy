@@ -528,13 +528,15 @@ Deno.serve(async (request: Request) => {
   let uploaded: CloudinaryUpload;
   let productUploaded: CloudinaryUpload | null = null;
   try {
-    uploaded = await uploadToCloudinary(image, imagePublicId);
-    if (productImage) {
-      productUploaded = await uploadToCloudinary(
-        productImage,
-        `roll-captures/${gatewayId}/${year}/${month}/${day}/product-weight/${eventId}`,
-      );
-    }
+    [uploaded, productUploaded] = await Promise.all([
+      uploadToCloudinary(image, imagePublicId),
+      productImage
+        ? uploadToCloudinary(
+          productImage,
+          `roll-captures/${gatewayId}/${year}/${month}/${day}/product-weight/${eventId}`,
+        )
+        : Promise.resolve(null),
+    ]);
   } catch (error) {
     const message = error instanceof Error ? error.message : "cloudinary_upload_failed";
     return json(500, { ok: false, error: message.split(":", 1)[0] });

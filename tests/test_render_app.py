@@ -8,11 +8,12 @@ from pathlib import Path
 
 import pytest
 
+import roll_qr_scale.render_app as render_app_module
 from roll_qr_scale.render_app import build_render_argv
 from roll_qr_scale.test_ui import build_parser, create_server
 
 
-def test_render_argv_uses_public_host_port_and_ephemeral_data_root(
+def test_render_argv_uses_public_host_port_and_configured_data_root(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setenv("PORT", "12345")
@@ -35,6 +36,17 @@ def test_render_argv_uses_public_host_port_and_ephemeral_data_root(
         "cam-a",
         "cam-b",
     ]
+
+
+def test_render_argv_prefers_mounted_persistent_disk(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("ROLL_SCALE_DATA_ROOT", raising=False)
+    mounted_disk = tmp_path / "var-data"
+    mounted_disk.mkdir()
+    monkeypatch.setattr(render_app_module, "RENDER_DISK_ROOT", mounted_disk)
+    argv = build_render_argv()
+
+    assert argv[argv.index("--db") + 1] == str(mounted_disk / "measurements.db")
+    assert argv[argv.index("--captures") + 1] == str(mounted_disk / "captures")
 
 
 def test_web_auth_protects_ui_but_leaves_health_check_public(
