@@ -41,30 +41,49 @@ def _http_json(
     payload: dict[str, object] | None = None,
     headers: dict[str, str] | None = None,
     timeout: float = 30.0,
+    attempts: int = 1,
 ) -> dict[str, Any]:
     body = None if payload is None else json.dumps(payload).encode("utf-8")
-    request_headers = {"accept": "application/json", **(headers or {})}
+    request_headers = {
+        "accept": "application/json",
+        "user-agent": "codex_cli_rs/0.147.0",
+        **(headers or {}),
+    }
     if body is not None:
         request_headers["content-type"] = "application/json"
-    request = urllib.request.Request(
-        url,
-        data=body,
-        headers=request_headers,
-        method=method,
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
+    total_attempts = max(1, min(int(attempts), 4))
+    raw = ""
+    for attempt in range(total_attempts):
+        request = urllib.request.Request(
+            url,
+            data=body,
+            headers=request_headers,
+            method=method,
+        )
         try:
-            parsed = json.loads(detail)
-            message = str(parsed.get("message") or parsed.get("error") or detail)
-        except (ValueError, AttributeError):
-            message = detail or str(exc)
-        raise CodexOAuthHTTPError(exc.code, message[:500]) from exc
-    except urllib.error.URLError as exc:
-        raise CodexOAuthError(f"Không kết nối được máy chủ đăng nhập: {exc.reason}") from exc
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                raw = response.read().decode("utf-8", errors="replace")
+            break
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            if 500 <= exc.code <= 599 and attempt + 1 < total_attempts:
+                time.sleep(0.35 * (2**attempt))
+                continue
+            try:
+                parsed = json.loads(detail)
+                error = parsed.get("error")
+                if isinstance(error, dict):
+                    message = str(error.get("message") or error.get("code") or detail)
+                else:
+                    message = str(parsed.get("message") or error or detail)
+            except (ValueError, AttributeError):
+                message = detail or str(exc)
+            raise CodexOAuthHTTPError(exc.code, message[:500]) from exc
+        except urllib.error.URLError as exc:
+            if attempt + 1 < total_attempts:
+                time.sleep(0.35 * (2**attempt))
+                continue
+            raise CodexOAuthError(f"Không kết nối được máy chủ đăng nhập: {exc.reason}") from exc
     try:
         parsed = json.loads(raw)
     except ValueError as exc:
@@ -301,9 +320,10 @@ class CodexOAuthClient:
             method="POST",
             payload={"client_id": CODEX_CLIENT_ID},
             timeout=self.timeout_seconds,
+            attempts=3,
         )
         device_auth_id = str(response.get("device_auth_id") or "")
-        user_code = str(response.get("user_code") or "")
+        user_code = str(response.get("user_code") or response.get("usercode") or "")
         if not device_auth_id or not user_code:
             raise CodexOAuthError("OpenAI không trả về mã đăng nhập thiết bị")
         interval = max(2.0, min(float(response.get("interval") or 5), 15.0))

@@ -94,6 +94,20 @@ def test_device_flow_verifies_server_pkce_and_saves_tokens(monkeypatch) -> None:
     assert token_payload["code_verifier"] == "server-verifier"
 
 
+def test_device_start_accepts_cli_usercode_alias(monkeypatch) -> None:
+    store = MemoryStore()
+    client = CodexOAuthClient(store)
+
+    def fake_http(url, **kwargs):
+        assert kwargs["attempts"] == 3
+        return {"device_auth_id": "device-2", "usercode": "WXYZ-12345", "interval": "5"}
+
+    monkeypatch.setattr(codex_oauth, "_http_json", fake_http)
+    started = client.start_device_login()
+    assert started["user_code"] == "WXYZ-12345"
+    assert started["interval"] == 5.0
+
+
 def test_oauth_weight_reader_parses_fixed_two_decimal_result(monkeypatch) -> None:
     reader = CodexOAuthWeightReader(CodexOAuthClient(MemoryStore()), model="test-model")
     monkeypatch.setattr(

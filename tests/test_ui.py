@@ -1214,6 +1214,7 @@ def test_ui_does_not_offer_fake_gemini_profile_when_backend_is_local() -> None:
     assert "recognitionProvider.disabled=!geminiPrimary" in TEST_UI_HTML
     assert "recognition_provider:recognitionProvider.value" in TEST_UI_HTML
     assert "'/api/codex/login'" in TEST_UI_HTML
+    assert "window.open('about:blank'" not in TEST_UI_HTML
     assert "BACKEND ĐANG DÙNG OCR LOCAL" in TEST_UI_HTML
 
 
