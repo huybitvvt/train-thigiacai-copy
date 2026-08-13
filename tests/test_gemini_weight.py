@@ -169,3 +169,69 @@ def test_fast_reader_limits_image_size_and_does_not_trust_ai_qr() -> None:
     assert result.qr_readable is False
     assert reader.status()["media_resolution"] == "medium"
     assert reader.status()["include_qr"] is False
+
+
+def test_panel_reader_sends_all_named_regions_in_one_request() -> None:
+    client = FakeClient({
+        "region_01": {"readable": True, "value": "21,69"},
+        "region_02": {"readable": False, "value": None},
+    })
+    reader = GeminiWeightReader("secret-key", client=client)
+
+    result = reader.read_panel_regions([
+        ("Ext. Speed 1", np.full((30, 60, 3), (20, 20, 220), dtype=np.uint8)),
+        ("TEMP 1", np.full((28, 58, 3), (20, 180, 20), dtype=np.uint8)),
+    ])
+
+    assert result["readings"] == [
+        {"label": "Ext. Speed 1", "readable": True, "value": "21.69"},
+        {"label": "TEMP 1", "readable": False, "value": None},
+    ]
+    assert len(client.models.calls) == 1
+    assert len(client.models.calls[0]["contents"]) == 3
+    schema = client.models.calls[0]["config"].response_schema
+    assert set(schema["required"]) == {"region_01", "region_02"}
+    assert "gray/unlit ghost segment" in client.models.calls[0]["contents"][0]
+
+
+def test_panel_reader_rejects_invalid_or_guessed_value() -> None:
+    client = FakeClient({"region_01": {"readable": True, "value": "TEMP 229 C"}})
+    reader = GeminiWeightReader("secret-key", client=client)
+
+    result = reader.read_panel_regions([
+        ("TEMP 1", np.zeros((30, 60, 3), dtype=np.uint8)),
+    ])
+
+    assert result["readings"] == [
+        {"label": "TEMP 1", "readable": False, "value": None}
+    ]
+
+
+def test_panel_reader_keeps_other_results_when_one_region_is_missing() -> None:
+    client = FakeClient({
+        "region_01": {"readable": True, "value": "229"},
+    })
+    reader = GeminiWeightReader("secret-key", client=client)
+
+    result = reader.read_panel_regions([
+        ("TEMP 1", np.zeros((30, 60, 3), dtype=np.uint8)),
+        ("TEMP 2", np.zeros((30, 60, 3), dtype=np.uint8)),
+    ])
+
+    assert result["readings"] == [
+        {"label": "TEMP 1", "readable": True, "value": "229"},
+        {"label": "TEMP 2", "readable": False, "value": None},
+    ]
+
+
+def test_panel_evidence_removes_gray_ghost_segments_but_keeps_led_pixels() -> None:
+    image = np.full((12, 20, 3), 75, dtype=np.uint8)
+    image[4:7, 3:8] = (20, 20, 220)
+    image[8:10, 12:15] = (20, 180, 20)
+
+    evidence = GeminiWeightReader._panel_evidence(image)
+    isolated = evidence[:, 23:]
+
+    assert np.all(isolated[0, 0] == 0)
+    assert isolated[5, 4, 2] == 220
+    assert isolated[8, 12, 1] == 180

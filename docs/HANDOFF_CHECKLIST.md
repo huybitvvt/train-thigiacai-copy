@@ -18,6 +18,14 @@
 6. Kiểm tra một bản ghi Supabase có cùng `event_id`, mã SP, hai số cân và hai ảnh.
 7. Lặp 5 vòng liên tiếp; không được trắng khung, kẹt nút hoặc tạo bản ghi trùng.
 
+## Test bảng nhiều chỉ số
+
+1. Bấm `Bảng nhiều chỉ số`, gán tên và vùng riêng cho từng hàng LED cần đọc.
+2. Tải lại trang; các vùng đã gán phải còn nguyên trên đúng trạm.
+3. Bấm `Đọc tất cả vùng`; kiểm tra tên và số trả về khớp từng bộ điều khiển.
+4. Vùng có nhiều hàng số, bị lóa hoặc mất nét phải trả `--` thay vì đoán.
+5. Sau khi camera đổi góc/zoom/độ phân giải, xóa cấu hình và gán lại trước khi dùng.
+
 ## Test sự cố
 
 - Ngắt mạng trước khi lưu: giao diện phải báo lưu cục bộ; nối mạng lại phải tự đồng bộ.

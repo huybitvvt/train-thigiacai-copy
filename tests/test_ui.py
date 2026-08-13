@@ -1130,12 +1130,84 @@ def test_remote_product_image_does_not_request_redundant_signed_url() -> None:
     assert "if not product_url and isinstance(product_path, str) and product_path:" in source
 
 
+def test_panel_region_configuration_is_persisted_and_validated(tmp_path) -> None:
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(
+        store,
+        None,
+        None,
+        None,
+        station_count=1,
+        station_ids=["station-01"],
+        camera_ids=["camera-01"],
+    )
+    regions = [
+        {"label": "TEMP 1", "x1": 0.1, "y1": 0.2, "x2": 0.3, "y2": 0.4},
+        {"label": "HEAD 1", "x1": 0.5, "y1": 0.2, "x2": 0.7, "y2": 0.4},
+    ]
+
+    assert service.save_panel_regions("station-01", regions) == regions
+    assert service.panel_regions("station-01") == regions
+    with pytest.raises(ValueError, match="Tên vùng"):
+        service.save_panel_regions("station-01", [regions[0], {**regions[1], "label": "temp 1"}])
+    service.close()
+    store.close()
+
+
+def test_panel_analysis_crops_all_regions_and_calls_gemini_once(tmp_path) -> None:
+    class FakePanelReader:
+        def __init__(self):
+            self.calls = []
+
+        def read_panel_regions(self, regions):
+            self.calls.append(regions)
+            return {
+                "ok": True,
+                "readings": [
+                    {"label": label, "readable": True, "value": str(index + 1)}
+                    for index, (label, _) in enumerate(regions)
+                ],
+            }
+
+        def status(self):
+            return {"enabled": True}
+
+        def close(self):
+            pass
+
+    reader = FakePanelReader()
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(
+        store,
+        None,
+        None,
+        None,
+        gemini_reader=reader,
+        weight_engine="gemini",
+    )
+    frame = np.zeros((200, 400, 3), dtype=np.uint8)
+    result = service.analyze_panel_regions(
+        frame,
+        [
+            {"label": "A", "x1": 0.1, "y1": 0.2, "x2": 0.3, "y2": 0.4},
+            {"label": "B", "x1": 0.5, "y1": 0.5, "x2": 0.9, "y2": 0.8},
+        ],
+    )
+
+    assert result["readings"][0]["label"] == "A"
+    assert len(reader.calls) == 1
+    assert reader.calls[0][0][1].shape[:2] == (40, 80)
+    assert reader.calls[0][1][1].shape[:2] == (60, 160)
+    service.close()
+    store.close()
+
+
 def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "session.qr=data.qr_code||''" not in TEST_UI_HTML
     assert "if(isProduct){session.productAnalysis=data" in TEST_UI_HTML
     assert "reliableQr=Boolean(data.qr_found&&!data.qr_conflict&&!qrDecoder.startsWith('gemini'))" in TEST_UI_HTML
     assert "if(reliableQr&&String(data.qr_code||'').trim()&&!String(session.qr||'').trim())session.qr=String(data.qr_code).trim()" in TEST_UI_HTML
-    assert "$('analyzeProductBtn').disabled=busy||!ready||!coreReady(session)" in TEST_UI_HTML
+    assert "$('analyzeProductBtn').disabled=panelMode||busy||!ready||!coreReady(session)" in TEST_UI_HTML
     assert "function coreCaptured(session)" in TEST_UI_HTML
     assert "function sourceReady(session)" in TEST_UI_HTML
     assert "if(isProduct&&!coreReady(session))" in TEST_UI_HTML
@@ -1162,6 +1234,15 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "CAPTURE_MAX_EDGE=1440" in TEST_UI_HTML
     assert "setInterval(loadRecords,15000)" in TEST_UI_HTML
     assert "appStatus.release||'local'" in TEST_UI_HTML
+    assert 'id="panelModeBtn"' in TEST_UI_HTML
+    assert 'id="drawPanelRegionBtn"' in TEST_UI_HTML
+    assert 'id="scanPanelBtn"' in TEST_UI_HTML
+    assert "'/api/panel/analyze'" in TEST_UI_HTML
+    assert "'/api/panel/regions'" in TEST_UI_HTML
+    assert "function panelPointerDown(" in TEST_UI_HTML
+    assert "function scanPanelRegions(" in TEST_UI_HTML
+    assert "Mỗi vùng chỉ ôm đúng một hàng số đang sáng" in TEST_UI_HTML
+    assert "loadPanelRegions(session).then" in TEST_UI_HTML
 
 
 def test_ui_enables_local_yolo_model_by_default(monkeypatch, tmp_path) -> None:

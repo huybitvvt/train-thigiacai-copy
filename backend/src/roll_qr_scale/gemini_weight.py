@@ -32,6 +32,13 @@ class _GeminiScalePayload(BaseModel):
     all_frames_agree: bool
 
 
+class _GeminiPanelPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    readable: bool
+    value: str | None
+
+
 _GEMINI_RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -48,6 +55,15 @@ _GEMINI_RESPONSE_SCHEMA = {
         "qr_code",
         "all_frames_agree",
     ],
+}
+
+_GEMINI_PANEL_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "readable": {"type": "boolean"},
+        "value": {"type": "string", "nullable": True},
+    },
+    "required": ["readable", "value"],
 }
 
 
@@ -161,12 +177,16 @@ class GeminiWeightReader:
             )
             height, width = prepared.shape[:2]
         if height < 256:
-            scale = 256 / max(1, height)
-            prepared = cv2.resize(
-                prepared,
-                (max(1, round(width * scale)), 256),
-                interpolation=cv2.INTER_CUBIC,
+            scale = min(
+                256 / max(1, height),
+                self.max_image_edge / max(1, width, height),
             )
+            if scale > 1:
+                prepared = cv2.resize(
+                    prepared,
+                    (max(1, round(width * scale)), max(1, round(height * scale))),
+                    interpolation=cv2.INTER_CUBIC,
+                )
         ok, encoded = cv2.imencode(
             ".jpg",
             prepared,
@@ -175,6 +195,32 @@ class GeminiWeightReader:
         if not ok:
             raise ValueError("Cannot encode Gemini ROI image")
         return encoded.tobytes()
+
+    @staticmethod
+    def _panel_evidence(image: np.ndarray) -> np.ndarray:
+        """Place the crop beside a view containing only actively lit LED colors."""
+        prepared = (
+            image[:, :, :3]
+            if image.ndim == 3
+            else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        )
+        blue, green, red = cv2.split(prepared)
+        red_i16, green_i16, blue_i16 = (
+            red.astype(np.int16),
+            green.astype(np.int16),
+            blue.astype(np.int16),
+        )
+        active_red = (red_i16 >= 105) & (
+            red_i16 - np.maximum(green_i16, blue_i16) >= 28
+        )
+        active_green = (green_i16 >= 80) & (
+            green_i16 - np.maximum(red_i16, blue_i16) >= 20
+        )
+        active = (active_red | active_green).astype(np.uint8) * 255
+        isolated = np.zeros_like(prepared)
+        isolated[active > 0] = prepared[active > 0]
+        divider = np.full((prepared.shape[0], 3, 3), 255, dtype=np.uint8)
+        return np.concatenate((prepared, divider, isolated), axis=1)
 
     @staticmethod
     def _payload(response: object) -> _GeminiScalePayload:
@@ -342,6 +388,144 @@ class GeminiWeightReader:
                 f"GEMINI ERROR: {error}",
                 latency,
             )
+
+    def read_panel_regions(
+        self,
+        regions: list[tuple[str, np.ndarray]],
+    ) -> dict[str, object]:
+        """Read independently configured controller displays in one Gemini request."""
+        if not 1 <= len(regions) <= 24:
+            raise ValueError("Panel scan requires between 1 and 24 configured regions")
+        labels: list[str] = []
+        label_keys: set[str] = set()
+        for label, image in regions:
+            clean_label = str(label).strip()
+            if not clean_label or len(clean_label) > 80:
+                raise ValueError("Panel region label is invalid")
+            if clean_label.casefold() in label_keys:
+                raise ValueError("Panel region labels must be unique")
+            if not isinstance(image, np.ndarray) or image.size == 0:
+                raise ValueError(f"Panel region {clean_label} is empty")
+            labels.append(clean_label)
+            label_keys.add(clean_label.casefold())
+
+        started = time.perf_counter()
+        with self._lock:
+            self._requests += 1
+        try:
+            from google.genai import types
+
+            region_keys = [f"region_{index:02d}" for index in range(1, len(labels) + 1)]
+            schema = {
+                "type": "object",
+                "properties": {
+                    key: _GEMINI_PANEL_RESPONSE_SCHEMA for key in region_keys
+                },
+                "required": region_keys,
+            }
+            prompt = (
+                "Each following image is one separately cropped industrial digital "
+                "controller value row. The images appear in this exact order: "
+                + ", ".join(
+                    f"{key}={json.dumps(label, ensure_ascii=False)}"
+                    for key, label in zip(region_keys, labels, strict=True)
+                )
+                + ". Each image has the original crop on the left and, after a white "
+                "divider, an active-color isolation on the right. For each named "
+                "display, transcribe only digit segments that are "
+                "actively illuminated red or green. Ignore every gray/unlit ghost "
+                "segment, printed label, setpoint row, status lamp, button and keypad. "
+                "Preserve the visible decimal point and minus sign exactly; never add "
+                "a unit or infer a decimal position. Each crop must contain exactly one "
+                "active numeric row; if it contains multiple active numeric rows or any "
+                "active digit cannot be read exactly, set readable=false and value=null. "
+                "Never guess. Return one object for every supplied region key."
+            )
+            contents: list[object] = [prompt]
+            contents.extend(
+                types.Part.from_bytes(
+                    data=self._jpeg(self._panel_evidence(image)),
+                    mime_type="image/jpeg",
+                    media_resolution=f"MEDIA_RESOLUTION_{self.media_resolution.upper()}",
+                )
+                for _, image in regions
+            )
+            thinking_config = (
+                types.ThinkingConfig(thinking_level=self.thinking_level)
+                if self.model.startswith("gemini-3")
+                else types.ThinkingConfig(thinking_budget=0)
+            )
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    max_output_tokens=max(160, len(regions) * 48),
+                    response_mime_type="application/json",
+                    response_schema=schema,
+                    thinking_config=thinking_config,
+                ),
+            )
+            parsed = getattr(response, "parsed", None)
+            if not isinstance(parsed, dict):
+                text = str(getattr(response, "text", "") or "").strip()
+                parsed = json.loads(text) if text else None
+            if not isinstance(parsed, dict):
+                raise ValueError("Gemini returned an invalid panel response")
+            readings: list[dict[str, object]] = []
+            for key, label in zip(region_keys, labels, strict=True):
+                try:
+                    payload = _GeminiPanelPayload.model_validate(parsed.get(key))
+                except Exception:
+                    readings.append(
+                        {"label": label, "readable": False, "value": None}
+                    )
+                    continue
+                value = (payload.value or "").strip()
+                valid = bool(
+                    payload.readable
+                    and re.fullmatch(r"-?\d{1,7}(?:[.,]\d{1,4})?", value)
+                )
+                readings.append(
+                    {
+                        "label": label,
+                        "readable": valid,
+                        "value": value.replace(",", ".") if valid else None,
+                    }
+                )
+            latency = time.perf_counter() - started
+            usage = getattr(response, "usage_metadata", None)
+            input_tokens = int(getattr(usage, "prompt_token_count", 0) or 0)
+            output_tokens = int(getattr(usage, "candidates_token_count", 0) or 0)
+            thinking_tokens = int(getattr(usage, "thoughts_token_count", 0) or 0)
+            total_tokens = int(getattr(usage, "total_token_count", 0) or 0)
+            with self._lock:
+                self._last_latency_seconds = latency
+                self._last_error = None
+                self._input_tokens += input_tokens
+                self._output_tokens += output_tokens
+                self._thinking_tokens += thinking_tokens
+                if all(item["readable"] for item in readings):
+                    self._successes += 1
+                else:
+                    self._failures += 1
+            return {
+                "ok": True,
+                "readings": readings,
+                "latency_seconds": latency,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "thinking_tokens": thinking_tokens,
+                "total_tokens": total_tokens,
+                "model": self.model,
+            }
+        except Exception as exc:
+            latency = time.perf_counter() - started
+            error = self._safe_error(exc)
+            with self._lock:
+                self._failures += 1
+                self._last_latency_seconds = latency
+                self._last_error = error
+            raise RuntimeError(error) from exc
 
     def status(self) -> dict[str, object]:
         with self._lock:

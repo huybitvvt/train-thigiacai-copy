@@ -591,6 +591,115 @@ class StationUIService:
             )
         return {"image_path": str(image_path.resolve()), "metadata_path": str(metadata_path.resolve())}
 
+    def analyze_panel_regions(
+        self,
+        frame: np.ndarray,
+        regions: object,
+        *,
+        recognition_profile: str = "fast",
+    ) -> dict[str, object]:
+        if self.gemini_reader is None:
+            raise ValueError("Gemini chưa được bật trên backend")
+        if not isinstance(regions, list) or not 1 <= len(regions) <= 24:
+            raise ValueError("Cần cấu hình từ 1 đến 24 vùng chỉ số")
+        cropped: list[tuple[str, np.ndarray]] = []
+        normalized: list[dict[str, object]] = []
+        labels: set[str] = set()
+        for item in regions:
+            if not isinstance(item, dict):
+                raise ValueError("Vùng chỉ số không hợp lệ")
+            label = str(item.get("label", "")).strip()
+            if not label or len(label) > 80 or label.casefold() in labels:
+                raise ValueError("Tên vùng chỉ số trống, trùng hoặc quá dài")
+            try:
+                roi = NormalizedROI(
+                    float(item["x1"]),
+                    float(item["y1"]),
+                    float(item["x2"]),
+                    float(item["y2"]),
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(f"Tọa độ vùng {label} không hợp lệ") from exc
+            if not (0 <= roi.x1 < roi.x2 <= 1 and 0 <= roi.y1 < roi.y2 <= 1):
+                raise ValueError(f"Tọa độ vùng {label} nằm ngoài ảnh")
+            left, top, right, bottom = roi.pixels(frame)
+            if right - left < 8 or bottom - top < 8:
+                raise ValueError(f"Vùng {label} quá nhỏ")
+            labels.add(label.casefold())
+            cropped.append((label, frame[top:bottom, left:right]))
+            normalized.append(
+                {
+                    "label": label,
+                    "x1": roi.x1,
+                    "y1": roi.y1,
+                    "x2": roi.x2,
+                    "y2": roi.y2,
+                }
+            )
+        reader = self._gemini_reader_for(recognition_profile)
+        result = reader.read_panel_regions(cropped)
+        return {**result, "regions": normalized}
+
+    def panel_regions(self, station_id: str) -> list[dict[str, object]]:
+        station_id = str(station_id).strip()
+        if station_id not in {str(item["station_id"]) for item in self.station_configs}:
+            raise ValueError("station_id không hợp lệ")
+        path = self.sessions.staging_dir.parent / "panel-regions.json"
+        try:
+            stored = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        items = stored.get(station_id, []) if isinstance(stored, dict) else []
+        return items if isinstance(items, list) else []
+
+    def save_panel_regions(self, station_id: str, regions: object) -> list[dict[str, object]]:
+        station_id = str(station_id).strip()
+        if station_id not in {str(item["station_id"]) for item in self.station_configs}:
+            raise ValueError("station_id không hợp lệ")
+        if not isinstance(regions, list) or len(regions) > 24:
+            raise ValueError("Danh sách vùng chỉ số không hợp lệ")
+        normalized: list[dict[str, object]] = []
+        labels: set[str] = set()
+        for item in regions:
+            if not isinstance(item, dict):
+                raise ValueError("Vùng chỉ số không hợp lệ")
+            label = str(item.get("label", "")).strip()
+            if not label or len(label) > 80 or label.casefold() in labels:
+                raise ValueError("Tên vùng chỉ số trống, trùng hoặc quá dài")
+            try:
+                x1, y1, x2, y2 = (
+                    float(item["x1"]),
+                    float(item["y1"]),
+                    float(item["x2"]),
+                    float(item["y2"]),
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(f"Tọa độ vùng {label} không hợp lệ") from exc
+            if not (0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1):
+                raise ValueError(f"Tọa độ vùng {label} nằm ngoài ảnh")
+            if x2 - x1 < 0.005 or y2 - y1 < 0.005:
+                raise ValueError(f"Vùng {label} quá nhỏ")
+            labels.add(label.casefold())
+            normalized.append(
+                {"label": label, "x1": x1, "y1": y1, "x2": x2, "y2": y2}
+            )
+        path = self.sessions.staging_dir.parent / "panel-regions.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            try:
+                stored = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                stored = {}
+            if not isinstance(stored, dict):
+                stored = {}
+            stored[station_id] = normalized
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(
+                json.dumps(stored, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            temporary.replace(path)
+        return normalized
+
     def _cleanup_evidence_steps(self, station_id: str, event_id: str) -> None:
         """Remove transient two-step evidence after save or operator discard."""
         station_id = str(station_id).strip()
@@ -1934,6 +2043,19 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                 except Exception as exc:
                     self.send_json(502, {"ok": False, "error": "lookup_failed", "message": str(exc)})
                 return
+            if parsed.path == "/api/panel/regions":
+                station_id = urllib.parse.parse_qs(parsed.query).get("station_id", [""])[0]
+                try:
+                    self.send_json(
+                        200,
+                        {"ok": True, "regions": service.panel_regions(station_id)},
+                    )
+                except ValueError as exc:
+                    self.send_json(
+                        422,
+                        {"ok": False, "error": "invalid_input", "message": str(exc)},
+                    )
+                return
             self.send_json(404, {"ok": False, "error": "not_found"})
 
         def do_POST(self) -> None:
@@ -1964,7 +2086,29 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                 if self.path == "/api/gemini/key":
                     self.send_json(200, service.replace_gemini_key(str(payload.get("api_key", ""))))
                     return
+                if self.path == "/api/panel/regions":
+                    self.send_json(
+                        200,
+                        {
+                            "ok": True,
+                            "regions": service.save_panel_regions(
+                                str(payload.get("station_id", "")),
+                                payload.get("regions"),
+                            ),
+                        },
+                    )
+                    return
                 frame = decode_image(str(payload.get("image", "")))
+                if self.path == "/api/panel/analyze":
+                    self.send_json(
+                        200,
+                        service.analyze_panel_regions(
+                            frame,
+                            payload.get("regions"),
+                            recognition_profile=str(payload.get("recognition_profile", "fast")),
+                        ),
+                    )
+                    return
                 product_frame = (
                     decode_image(str(payload.get("product_image", "")))
                     if payload.get("product_image")

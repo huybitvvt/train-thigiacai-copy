@@ -190,6 +190,26 @@ Mở `http://127.0.0.1:8080` rồi vận hành như sau:
 5. Kiểm tra hai số cân, hai preview bằng chứng và mã SP tự đọc. `Enter` chỉ lưu khi đủ hai số cân + hai ảnh + mã SP trong cùng event. Dùng `Bỏ lần đang xem` nếu thật sự muốn hủy cả phiên.
 6. Sau khi SQLite commit thành công, tùy chọn auto-advance chọn trạm kế tiếp theo vòng tròn. Checkbox trên giao diện có thể đổi hành vi trong phiên hiện tại.
 
+### Đọc đồng loạt bảng nhiều chỉ số
+
+Chế độ này độc lập với luồng cân lõi/cân sản phẩm và chỉ hoạt động khi Gemini API
+đang bật. Bấm `Bảng nhiều chỉ số`, mở camera cố định hoặc chọn một ảnh đúng góc lắp
+thực tế, rồi thực hiện một lần:
+
+1. Nhập tên chỉ số, ví dụ `Screw 1 - Temp 1`, bấm `Gán vùng`, rồi kéo khung chỉ
+   quanh đúng một hàng số LED đang sáng. Không khoanh cả bộ điều khiển, hàng
+   setpoint phía dưới, đèn trạng thái hoặc nút bấm.
+2. Lặp lại cho tối đa 24 chỉ số. Cấu hình được lưu theo `station_id` trong
+   `/var/data/captures/panel-regions.json` khi Render có Persistent Disk, đồng thời
+   có bản cache trong trình duyệt để dùng khi API tạm mất kết nối.
+3. Bấm `Đọc tất cả vùng`. Backend crop mọi vùng từ cùng một khung hình và gửi trong
+   một request Gemini; kết quả trả về theo đúng tên từng chỉ số. Vùng không chắc chắn
+   hiển thị `--`, không tự đoán.
+
+Camera phải giữ nguyên vị trí sau khi gán. Nếu camera bị xoay, zoom, đổi độ phân giải
+hoặc bảng bị dịch chuyển, xóa và gán lại vùng. Mỗi ảnh gửi Gemini gồm crop gốc và bản
+lọc LED đỏ/xanh để giảm nhầm các đoạn số xám chưa sáng.
+
 Nút `Dùng ảnh demo kho` nạp QR `ROLL-WAREHOUSE-002015` và cân `20.15 kg` vào trạm đang chọn. Chọn tệp ảnh cũng tự phân tích tại trạm đang chọn. Khi đã cấu hình cloud, outbox gửi nền sau commit local; lỗi mạng không làm request lưu tại trạm thất bại. YOLO là tùy chọn, còn QR rõ được ZXing/OpenCV giải mã trực tiếp.
 
 Token Supabase chỉ nằm trong backend Python, không được đưa xuống JavaScript. Camera trình duyệt hoạt động trên `localhost`; mặc định server không mở ra mạng LAN. Các preview camera có thể chạy đồng thời nhưng CPU QR/OCR cố ý chỉ có một worker, vì vậy phải đo thông lượng thực tế trước khi dùng ba camera.
