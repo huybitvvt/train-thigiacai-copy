@@ -837,6 +837,7 @@ class StationUIService:
         frames = [frame, *(weight_frames or [])]
         auto_roi = roi_text.strip().lower() in {"", "auto"}
         roi: NormalizedROI | None
+        crop_retry_method: str | None = None
         if self.weight_engine == "gemini":
             provider_prefix = recognition_provider
             optimized_capture = capture_kind in {"core", "product"}
@@ -847,13 +848,14 @@ class StationUIService:
                 located = detect_weight_roi(frame)
                 if located is None:
                     roi = None
-                    roi_method = f"{provider_prefix}-full-frame-fallback"
                 else:
                     roi, detected_method = located
-                    roi_method = f"{provider_prefix}-crop-{detected_method}"
+                    crop_retry_method = detected_method
+                roi_method = f"{provider_prefix}-full-frame"
             else:
                 roi = parse_normalized_roi(roi_text)
-                roi_method = roi_method_override or f"{provider_prefix}-crop-manual"
+                crop_retry_method = roi_method_override or "manual"
+                roi_method = f"{provider_prefix}-full-frame"
         elif auto_roi:
             located = (
                 detect_weight_roi_consensus(frames)
@@ -903,6 +905,7 @@ class StationUIService:
         gemini_total_tokens: int | None = None
         gemini_attempts = 0
         gemini_fallback_used = False
+        ai_crop_applied = False
         requires_human_review = False
         if self.weight_engine == "gemini":
             if recognition_provider == "codex":
@@ -920,8 +923,6 @@ class StationUIService:
             provider_source = "codex-primary" if codex_used else "gemini-primary"
             single_image_request = len(frames) == 1
             ai_frames = [frame] if single_image_request else frames
-            if capture_kind in {"core", "product"} and roi is not None:
-                ai_frames = [self._gemini_crop(item, roi) for item in ai_frames]
             if len(ai_frames) == 2:
                 reading = WeightReading(
                     None,
@@ -935,27 +936,33 @@ class StationUIService:
                 gemini_attempts = 1
                 suggestion_raw = suggestion.raw
                 suggestions = [suggestion]
-                crop_was_used = bool(
+                crop_is_available = bool(
                     capture_kind in {"core", "product"} and roi is not None
                 )
-                # Keep the normal path fast. Retry the original full frame only
-                # when Gemini returned a valid response but could not read the
-                # focused LED crop. Network/API errors are not retried here.
+                # Full-frame is the normal path: Gemini can locate the small scale
+                # display from its factory context. Only retry a focused LED crop
+                # when a valid AI response explicitly says the weight is unreadable.
+                # Network/API errors are not retried here.
                 if (
-                    crop_was_used
+                    crop_is_available
                     and suggestion.value is None
                     and not suggestion.raw.startswith(f"{provider_label} ERROR:")
                 ):
-                    fallback = selected_ai_reader.read(frames, unit=unit)
+                    cropped_frames = [self._gemini_crop(item, roi) for item in ai_frames]
+                    fallback = selected_ai_reader.read(cropped_frames, unit=unit)
                     suggestions.append(fallback)
                     gemini_attempts = 2
                     gemini_fallback_used = True
+                    ai_crop_applied = True
                     suggestion_raw = (
-                        f"CROP ATTEMPT: {suggestion.raw}; "
-                        f"FULL FRAME RETRY: {fallback.raw}"
+                        f"FULL FRAME ATTEMPT: {suggestion.raw}; "
+                        f"CROP RETRY: {fallback.raw}"
                     )
                     suggestion = fallback
-                    roi_method = f"{roi_method}+full-frame-retry"
+                    roi_method = (
+                        f"{provider_prefix}-full-frame+crop-"
+                        f"{crop_retry_method or 'detected'}-retry"
+                    )
                 gemini_suggestion = suggestion.value
                 gemini_latency_seconds = sum(item.latency_seconds for item in suggestions)
                 gemini_input_tokens = sum(item.input_tokens for item in suggestions)
@@ -997,7 +1004,12 @@ class StationUIService:
                         suggestion.unit,
                         True,
                         (
-                            f"{suggestion_raw}{qr_note}; {provider_label} PRIMARY: single full-image accepted"
+                            f"{suggestion_raw}{qr_note}; {provider_label} PRIMARY: "
+                            + (
+                                "single focused-crop retry accepted"
+                                if ai_crop_applied
+                                else "single full-image accepted"
+                            )
                             if single_image_request
                             else f"{suggestion_raw}{qr_note}; {provider_label} PRIMARY: 3-frame schema accepted"
                         ),
@@ -1107,16 +1119,8 @@ class StationUIService:
             "requires_human_review": requires_human_review,
             "roi": self._roi_text(roi) if roi is not None else None,
             "roi_method": roi_method,
-            "gemini_crop_applied": bool(
-                self.weight_engine == "gemini"
-                and capture_kind in {"core", "product"}
-                and roi is not None
-            ),
-            "ai_crop_applied": bool(
-                self.weight_engine == "gemini"
-                and capture_kind in {"core", "product"}
-                and roi is not None
-            ),
+            "gemini_crop_applied": ai_crop_applied,
+            "ai_crop_applied": ai_crop_applied,
             "burst_frames": len(frames),
             "quality": quality_payload,
             "quality_pass": quality_pass,
@@ -1684,9 +1688,9 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
             model=args.gemini_model,
             timeout_seconds=args.gemini_timeout,
             thinking_level="minimal",
-            max_image_edge=1280,
-            jpeg_quality=86,
-            media_resolution="medium",
+            max_image_edge=1600,
+            jpeg_quality=90,
+            media_resolution="high",
             include_qr=False,
         )
         gemini_accurate_reader = GeminiWeightReader(

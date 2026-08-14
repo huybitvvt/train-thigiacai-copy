@@ -263,7 +263,7 @@ Thao tác mỗi lần cân:
 3. Kiểm tra mã, số cân và độ tin cậy trên cửa sổ.
 4. Đúng thì nhấn `Enter` để lưu; sai thì chỉnh vị trí/ánh sáng và nhấn `Space` chụp lại.
 
-Camera có thể mở cả ca, nhưng YOLO/PaddleOCR không chạy liên tục. Chế độ `local`/`hybrid` chỉ lấy burst khi bấm chụp; mặc định chụp 5 frame rồi chọn đúng 3 frame đầu–giữa–cuối. Chế độ `gemini` gửi một ảnh JPEG đã nén cho mỗi lần chụp; backend dùng ROI cấu hình hoặc tự dò LED để crop trước khi gọi Gemini. Nếu Gemini trả kết quả hợp lệ nhưng không đọc được crop, backend thử lại toàn khung đúng một lần; lỗi mạng/timeout không bị gọi lặp. Chế độ CLI `roll-qr-scale` vẫn đọc một ảnh như trước.
+Camera có thể mở cả ca, nhưng YOLO/PaddleOCR không chạy liên tục. Chế độ `local`/`hybrid` chỉ lấy burst khi bấm chụp; mặc định chụp 5 frame rồi chọn đúng 3 frame đầu–giữa–cuối. Chế độ `gemini` ưu tiên camera 1920×1080 và gửi toàn ảnh JPEG cạnh tối đa 1600 px ở media resolution cao trong lần gọi đầu tiên. Nếu Gemini trả kết quả hợp lệ nhưng không đọc được toàn ảnh, backend mới tự dò LED và thử lại crop đúng một lần; lỗi mạng/timeout không bị gọi lặp. Chế độ CLI `roll-qr-scale` vẫn đọc một ảnh như trước.
 
 ### Gemini fallback tùy chọn
 
@@ -280,10 +280,10 @@ $env:ROLL_SCALE_GEMINI_TIMEOUT = "10.0"
 
 `ROLL_SCALE_WEIGHT_ENGINE` có ba chế độ: `local` chỉ dùng Paddle, `hybrid`
 dùng Paddle trước rồi Gemini xác nhận ứng viên local, và `gemini` dùng Gemini
-làm bộ đọc chính. Ở chế độ `gemini`, mỗi lần chụp gửi một ảnh bằng chứng đã
-nén; backend crop vùng LED rồi chỉ yêu cầu Gemini đọc số cân. Paddle không
-preload hoặc suy luận. Mã SP do BarcodeDetector trên trình duyệt và ZXing
-backend đọc độc lập; nếu hai nguồn khác nhau, hệ thống không tự điền mã.
+làm bộ đọc chính. Ở chế độ `gemini`, mỗi lần chụp gửi một ảnh bằng chứng toàn
+khung; Gemini tự tìm màn hình cân trong ngữ cảnh ảnh. Crop LED chỉ là retry.
+Paddle không preload hoặc suy luận. Mã SP do BarcodeDetector trên trình duyệt
+và ZXing backend đọc độc lập; nếu hai nguồn khác nhau, hệ thống không tự điền mã.
 
 Luồng hybrid chấp nhận theo kiểu fail-closed:
 
