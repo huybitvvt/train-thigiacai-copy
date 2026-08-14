@@ -1212,7 +1212,7 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "function sourceReady(session)" in TEST_UI_HTML
     assert "if(isProduct&&!coreReady(session))" in TEST_UI_HTML
     assert "session._analyzeLock=false;renderControls();status(captureStatus,error.message" in TEST_UI_HTML
-    assert "if(eventId){await api('/api/session/discard'" in TEST_UI_HTML
+    assert "await api('/api/session/discard'" in TEST_UI_HTML
     assert "if(!isProduct&&session.coreAnalysis&&session.analysisId)" in TEST_UI_HTML
     assert 'id="analyzeCoreBtn"' in TEST_UI_HTML
     assert 'id="analyzeProductBtn"' in TEST_UI_HTML
@@ -1325,7 +1325,10 @@ def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
         "session.deviceId&&!session.hasUnsavedReview()",
         "weight_frames:weightFrames",
         "captureWeightBurst(session)",
-        "event.key==='Backspace'&&!typing",
+        "function isTextEditingTarget(target)",
+        "event.key==='Backspace'&&current()?.hasUnsavedReview()",
+        "discardCurrent(requireConfirmation=false)",
+        "session._discardLock=true;renderControls()",
         "discardCurrent(false)",
     ):
         assert marker in TEST_UI_HTML
