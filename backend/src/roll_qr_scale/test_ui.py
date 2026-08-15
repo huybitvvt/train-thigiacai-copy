@@ -484,6 +484,179 @@ class StationUIService:
             max(0, left - pad_x) : min(frame_width, right + pad_x),
         ]
 
+    @staticmethod
+    def _distant_weight_roi(frame: np.ndarray) -> tuple[NormalizedROI, str] | None:
+        """Find a tiny red LED row in a portrait factory overview.
+
+        The normal detector is deliberately strict for OCR. This fallback is
+        only used to create a contextual zoom inset for AI and cloud evidence.
+        """
+
+        if frame.ndim != 3 or frame.shape[2] < 3:
+            return None
+        height, width = frame.shape[:2]
+        blue, green, red = cv2.split(frame[:, :, :3])
+        red_i16 = red.astype(np.int16)
+        other = np.maximum(green, blue).astype(np.int16)
+        mask = ((red_i16 >= 120) & (red_i16 - other >= 45)).astype(np.uint8)
+        mask[: round(height * 0.30), :] = 0
+        joined = cv2.morphologyEx(
+            mask,
+            cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
+        )
+        count, _, stats, _ = cv2.connectedComponentsWithStats(joined, connectivity=8)
+        candidates: list[tuple[float, tuple[int, int, int, int]]] = []
+        for index in range(1, count):
+            left, top, box_width, box_height, _ = (int(value) for value in stats[index])
+            if box_width < 5 or box_height < 5:
+                continue
+            if box_width > width * 0.08 or box_height > height * 0.035:
+                continue
+            aspect = box_width / max(1, box_height)
+            if not 0.8 <= aspect <= 12:
+                continue
+            region = mask[top : top + box_height, left : left + box_width]
+            red_pixels = int(np.count_nonzero(region))
+            density = red_pixels / max(1, box_width * box_height)
+            if red_pixels < 8 or density < 0.08:
+                continue
+            center_bias = (top + (box_height / 2)) / max(1, height)
+            score = red_pixels * (1 + min(aspect, 4) * 0.12) + center_bias * 8
+            candidates.append(
+                (score, (left, top, left + box_width, top + box_height))
+            )
+        if not candidates:
+            return None
+        _, (left, top, right, bottom) = max(candidates, key=lambda item: item[0])
+        return NormalizedROI(
+            left / width,
+            top / height,
+            right / width,
+            bottom / height,
+        ), "distant-red-led"
+
+    @staticmethod
+    def _scale_context_crop(frame: np.ndarray, roi: NormalizedROI) -> np.ndarray:
+        """Include the indicator, scale platform, and weighed object in the zoom."""
+
+        left, top, right, bottom = roi.pixels(frame)
+        frame_height, frame_width = frame.shape[:2]
+        roi_width = max(1, right - left)
+        roi_height = max(1, bottom - top)
+        crop_width = min(
+            frame_width,
+            max(round(frame_width * 0.40), roi_width * 10),
+        )
+        crop_height = min(
+            frame_height,
+            max(round(frame_height * 0.24), roi_height * 12),
+        )
+        center_x = (left + right) / 2
+        # Keep more room above the LED row for the platform and weighed item.
+        crop_left = round(center_x - (crop_width / 2))
+        crop_top = round(((top + bottom) / 2) - (crop_height * 0.64))
+        crop_left = min(max(0, crop_left), frame_width - crop_width)
+        crop_top = min(max(0, crop_top), frame_height - crop_height)
+        return frame[
+            crop_top : crop_top + crop_height,
+            crop_left : crop_left + crop_width,
+        ]
+
+    @classmethod
+    def _zoomed_evidence(
+        cls,
+        frame: np.ndarray,
+        roi: NormalizedROI,
+    ) -> tuple[np.ndarray, NormalizedROI]:
+        """Keep the full scene and append a large, clearly marked scale-display inset."""
+
+        crop = cls._scale_context_crop(frame, roi)
+        crop_height, crop_width = crop.shape[:2]
+        frame_height, frame_width = frame.shape[:2]
+        if crop_height < 1 or crop_width < 1:
+            return frame, roi
+
+        margin = max(12, round(min(frame_height, frame_width) * 0.012))
+        label_height = max(30, round(frame_height * 0.04))
+        portrait = frame_height > frame_width * 1.15
+        target_width = max(1, frame_width - (2 * margin))
+        target_height = (
+            max(120, frame_height - label_height - (3 * margin))
+            if portrait
+            else max(120, round(frame_height * 0.34))
+        )
+        scale = min(target_width / crop_width, target_height / crop_height)
+        zoom_width = max(1, min(target_width, round(crop_width * scale)))
+        zoom_height = max(1, min(target_height, round(crop_height * scale)))
+        interpolation = cv2.INTER_CUBIC if scale > 1 else cv2.INTER_AREA
+        zoomed = cv2.resize(crop, (zoom_width, zoom_height), interpolation=interpolation)
+
+        if portrait:
+            composite = np.full(
+                (frame_height, frame_width * 2, 3),
+                24,
+                dtype=frame.dtype,
+            )
+            zoom_left = frame_width + ((frame_width - zoom_width) // 2)
+            zoom_top = label_height + margin + (
+                (frame_height - label_height - (2 * margin) - zoom_height) // 2
+            )
+            label_origin = (frame_width + margin, label_height)
+        else:
+            panel_height = label_height + zoom_height + (2 * margin)
+            composite = np.full(
+                (frame_height + panel_height, frame_width, 3),
+                24,
+                dtype=frame.dtype,
+            )
+            zoom_left = (frame_width - zoom_width) // 2
+            zoom_top = frame_height + label_height + margin
+            label_origin = (margin, frame_height + label_height)
+        composite[:frame_height, :frame_width] = frame
+        composite[
+            zoom_top : zoom_top + zoom_height,
+            zoom_left : zoom_left + zoom_width,
+        ] = zoomed
+        cv2.rectangle(
+            composite,
+            (max(0, zoom_left - 2), max(0, zoom_top - 2)),
+            (
+                min(composite.shape[1] - 1, zoom_left + zoom_width + 1),
+                min(composite.shape[0] - 1, zoom_top + zoom_height + 1),
+            ),
+            (230, 230, 230),
+            2,
+        )
+        cv2.putText(
+            composite,
+            "ZOOM MAN HINH CAN",
+            label_origin,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            max(0.55, frame_width / 1800),
+            (240, 240, 240),
+            2,
+            cv2.LINE_AA,
+        )
+        composite_height = composite.shape[0]
+        composite_width = composite.shape[1]
+        zoom_roi = NormalizedROI(
+            zoom_left / composite_width,
+            zoom_top / composite_height,
+            (zoom_left + zoom_width) / composite_width,
+            (zoom_top + zoom_height) / composite_height,
+        )
+        return composite, zoom_roi
+
+    @staticmethod
+    def _canonical_evidence(frame: np.ndarray) -> tuple[np.ndarray, str]:
+        encoded = encode_staged_jpeg(frame, quality=90)
+        canonical = cv2.imdecode(np.frombuffer(encoded, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if canonical is None:
+            raise OSError("Không chuẩn hóa được ảnh zoom cân")
+        data_url = "data:image/jpeg;base64," + base64.b64encode(encoded).decode("ascii")
+        return canonical, data_url
+
     def status(self) -> dict[str, object]:
         station_states = {item["station_id"]: item for item in self.sessions.statuses()}
         stations: list[dict[str, object]] = []
@@ -855,7 +1028,11 @@ class StationUIService:
             else:
                 roi = parse_normalized_roi(roi_text)
                 crop_retry_method = roi_method_override or "manual"
-                roi_method = f"{provider_prefix}-full-frame"
+                roi_method = (
+                    f"{provider_prefix}-full-frame+{roi_method_override}"
+                    if roi_method_override and roi_method_override.startswith("zoom-")
+                    else f"{provider_prefix}-full-frame"
+                )
         elif auto_roi:
             located = (
                 detect_weight_roi_consensus(frames)
@@ -1164,12 +1341,36 @@ class StationUIService:
         configured_roi = self.weight_rois.get(context_station_id or station_id or "")
         if configured_roi is None and not any(identities) and self.station_count == 1:
             configured_roi = self.weight_rois.get(str(self.station_configs[0]["station_id"]))
+        auto_roi_requested = roi_text.strip().lower() in {"", "auto"}
         roi_method_override = None
-        if roi_text.strip().lower() in {"", "auto"} and configured_roi is not None:
+        if auto_roi_requested and configured_roi is not None:
             roi_text = self._roi_text(configured_roi)
             roi_method_override = "camera-calibrated"
+        evidence_image: str | None = None
+        evidence_zoom_applied = False
+        evidence_zoom_method: str | None = None
+        if self.weight_engine == "gemini" and capture_kind in {"core", "product"}:
+            located: tuple[NormalizedROI, str] | None
+            if configured_roi is not None and auto_roi_requested:
+                located = configured_roi, "camera-calibrated"
+            elif not auto_roi_requested:
+                located = parse_normalized_roi(roi_text), "manual"
+            else:
+                located = detect_weight_roi(frame) or self._distant_weight_roi(frame)
+            if located is not None:
+                source_roi, evidence_zoom_method = located
+                composite, zoom_roi = self._zoomed_evidence(frame, source_roi)
+                frame, evidence_image = self._canonical_evidence(composite)
+                roi_text = self._roi_text(zoom_roi)
+                roi_method_override = f"zoom-{evidence_zoom_method}"
+                evidence_zoom_applied = True
+        evidence_metadata = {
+            "evidence_image": evidence_image,
+            "evidence_zoom_applied": evidence_zoom_applied,
+            "evidence_zoom_method": evidence_zoom_method,
+        }
         if not any(identities):
-            return self.inference.run(
+            result = self.inference.run(
                 self._analyze_frame,
                 frame,
                 roi_text,
@@ -1181,6 +1382,7 @@ class StationUIService:
                 capture_kind,
                 client_qr_code,
             )
+            return {**result, **evidence_metadata}
         if not all(identities):
             raise ValueError("Cần đủ event_id, station_id và camera_id")
         assert event_id is not None and station_id is not None and camera_id is not None
@@ -1211,7 +1413,7 @@ class StationUIService:
             except SessionConflictError:
                 pass
             raise
-        return {**result, **binding.as_dict()}
+        return {**result, **binding.as_dict(), **evidence_metadata}
 
     def capture(
         self,
@@ -2158,8 +2360,13 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         and result.get("weight_found")
                         and result.get("quality_pass")
                     ):
+                        evidence_frame = (
+                            decode_image(str(result["evidence_image"]))
+                            if result.get("evidence_image")
+                            else frame
+                        )
                         staged = service.stage_evidence_step(
-                            frame,
+                            evidence_frame,
                             event_id=str(payload.get("event_id", "")),
                             station_id=str(payload.get("station_id", "")),
                             kind=capture_kind,

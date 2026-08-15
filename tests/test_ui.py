@@ -693,11 +693,16 @@ def test_gemini_full_frame_keeps_local_qr_on_cloud_conflict(tmp_path) -> None:
     assert "kept checksum-validated local QR" in result["weight_raw"]
 
 
-def test_render_capture_sends_full_frame_to_gemini_first(tmp_path, monkeypatch) -> None:
+def test_render_capture_sends_full_frame_with_scale_zoom_to_gemini(tmp_path, monkeypatch) -> None:
     class FakeGeminiReader:
+        def __init__(self):
+            self.shape = None
+
         def read(self, frames, *, unit):
             assert len(frames) == 1
-            assert frames[0].shape[:2] == (600, 800)
+            self.shape = frames[0].shape[:2]
+            assert self.shape[0] > 600
+            assert self.shape[1] == 800
             return GeminiWeightSuggestion(13.04, unit, True, True, "GEMINI:test", 0.2)
 
         def status(self):
@@ -712,12 +717,13 @@ def test_render_capture_sends_full_frame_to_gemini_first(tmp_path, monkeypatch) 
         lambda frame: (NormalizedROI(0.4, 0.7, 0.6, 0.8), "red-led"),
     )
     store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    reader = FakeGeminiReader()
     service = StationUIService(
         store,
         None,
         None,
         None,
-        gemini_reader=FakeGeminiReader(),
+        gemini_reader=reader,
         weight_engine="gemini",
     )
 
@@ -731,10 +737,100 @@ def test_render_capture_sends_full_frame_to_gemini_first(tmp_path, monkeypatch) 
     service.close()
     store.close()
     assert result["weight"] == pytest.approx(13.04)
+    assert reader.shape is not None
+    assert result["evidence_zoom_applied"] is True
+    assert result["evidence_zoom_method"] == "red-led"
+    assert str(result["evidence_image"]).startswith("data:image/jpeg;base64,")
     assert result["gemini_crop_applied"] is False
     assert result["gemini_attempts"] == 1
     assert result["gemini_fallback_used"] is False
-    assert result["roi_method"] == "gemini-full-frame"
+    assert result["roi_method"] == "gemini-full-frame+zoom-red-led"
+
+
+def test_zoomed_core_evidence_keeps_analysis_binding_for_final_save(
+    tmp_path, monkeypatch
+) -> None:
+    class FakeGeminiReader:
+        def read(self, frames, *, unit):
+            return GeminiWeightSuggestion(13.04, unit, True, True, "GEMINI:test", 0.2)
+
+        def status(self):
+            return {"enabled": True}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        test_ui_module,
+        "detect_weight_roi",
+        lambda frame: (NormalizedROI(0.4, 0.7, 0.6, 0.8), "red-led"),
+    )
+    frame = np.random.default_rng(7).integers(
+        60, 220, size=(600, 800, 3), dtype=np.uint8
+    )
+    event_id = str(uuid.uuid4())
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(
+        store,
+        None,
+        None,
+        None,
+        gemini_reader=FakeGeminiReader(),
+        weight_engine="gemini",
+    )
+
+    analysis = service.analyze(
+        frame,
+        "auto",
+        "kg",
+        event_id=event_id,
+        station_id="station-01",
+        camera_id="camera-01",
+        capture_kind="core",
+    )
+    evidence = decode_image(str(analysis["evidence_image"]))
+    saved = service.capture(
+        "ROLL-ZOOM-001",
+        13.04,
+        "kg",
+        evidence,
+        True,
+        "GEMINI:test",
+        event_id=event_id,
+        analysis_id=str(analysis["analysis_id"]),
+        station_id="station-01",
+        camera_id="camera-01",
+        frame_sha256=str(analysis["frame_sha256"]),
+    )
+    row = store.get(event_id)
+
+    service.close()
+    store.close()
+    assert saved["frame_sha256"] == analysis["frame_sha256"]
+    assert row is not None
+    stored_frame = cv2.imread(row.image_path)
+    assert stored_frame is not None
+    assert stored_frame.shape[0] > frame.shape[0]
+
+
+def test_distant_portrait_scale_gets_side_by_side_context_zoom() -> None:
+    frame = np.full((1280, 592, 3), 140, dtype=np.uint8)
+    cv2.rectangle(frame, (210, 347), (286, 396), (0, 0, 230), -1)
+    cv2.rectangle(frame, (218, 396), (279, 408), (0, 0, 230), -1)
+    cv2.rectangle(frame, (131, 461), (139, 478), (0, 0, 230), -1)
+    cv2.rectangle(frame, (306, 488), (319, 498), (0, 0, 255), -1)
+
+    located = StationUIService._distant_weight_roi(frame)
+
+    assert located is not None
+    roi, method = located
+    assert method == "distant-red-led"
+    assert roi.x1 == pytest.approx(306 / 592, abs=0.01)
+    assert roi.y1 == pytest.approx(488 / 1280, abs=0.01)
+    composite, zoom_roi = StationUIService._zoomed_evidence(frame, roi)
+    assert composite.shape[:2] == (1280, 1184)
+    assert zoom_roi.x1 >= 0.5
+    assert zoom_roi.x2 > zoom_roi.x1
 
 
 def test_core_capture_skips_unrelated_qr_decode(tmp_path, monkeypatch) -> None:
@@ -840,9 +936,10 @@ def test_unreadable_gemini_full_frame_retries_one_led_crop(tmp_path, monkeypatch
 
     service.close()
     store.close()
-    assert reader.shapes[0] == (600, 800)
-    assert reader.shapes[1][0] < 200
-    assert reader.shapes[1][1] < 300
+    assert reader.shapes[0][0] > 600
+    assert reader.shapes[0][1] == 800
+    assert reader.shapes[1][0] < reader.shapes[0][0]
+    assert reader.shapes[1][1] < reader.shapes[0][1]
     assert result["weight"] == pytest.approx(13.04)
     assert result["gemini_attempts"] == 2
     assert result["gemini_fallback_used"] is True
@@ -851,7 +948,7 @@ def test_unreadable_gemini_full_frame_retries_one_led_crop(tmp_path, monkeypatch
     assert result["gemini_output_tokens"] == 30
     assert result["gemini_total_tokens"] == 330
     assert result["gemini_crop_applied"] is True
-    assert result["roi_method"] == "gemini-full-frame+crop-red-led-retry"
+    assert result["roi_method"] == "gemini-full-frame+crop-zoom-red-led-retry"
     assert "FULL FRAME ATTEMPT" in result["weight_raw"]
     assert "CROP RETRY" in result["weight_raw"]
 
@@ -1231,6 +1328,10 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "initialCameraPermissionCheck&&stations.some(session=>session.deviceId)" in TEST_UI_HTML
     assert "function decodeClientQr(canvas)" in TEST_UI_HTML
     assert "client_qr_code:clientQr" in TEST_UI_HTML
+    assert "const evidenceImage=data.evidence_image||image" in TEST_UI_HTML
+    assert "session.productImage=evidenceImage" in TEST_UI_HTML
+    assert "session.capturedImage=evidenceImage" in TEST_UI_HTML
+    assert "AI đọc toàn ảnh + zoom cân" in TEST_UI_HTML
     assert "CAPTURE_MAX_EDGE=1600" in TEST_UI_HTML
     assert "width:{ideal:1920}" in TEST_UI_HTML
     assert "height:{ideal:1080}" in TEST_UI_HTML
