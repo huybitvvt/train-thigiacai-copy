@@ -1349,6 +1349,21 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "loadPanelRegions(session).then" in TEST_UI_HTML
 
 
+def test_ui_buttons_start_once_and_show_immediate_press_feedback() -> None:
+    assert "function pulseButton(btn)" in TEST_UI_HTML
+    assert "btn.dataset.busy==='1'" in TEST_UI_HTML
+    assert "btn.setAttribute('aria-busy','true')" in TEST_UI_HTML
+    assert "document.querySelectorAll('button:not([type])')" in TEST_UI_HTML
+    assert "document.addEventListener('pointerdown'" in TEST_UI_HTML
+    assert "bindActionButton('cameraBtn'" in TEST_UI_HTML
+    assert "bindActionButton('panelModeBtn'" in TEST_UI_HTML
+    assert "$('analyzeCoreBtn').click()" in TEST_UI_HTML
+    assert "$('analyzeProductBtn').click()" in TEST_UI_HTML
+    assert "$('discardBtn').click()" in TEST_UI_HTML
+    assert "$('saveBtn').click()" in TEST_UI_HTML
+    assert "Chụp lại cân lõi?" not in TEST_UI_HTML
+
+
 def test_ui_enables_local_yolo_model_by_default(monkeypatch, tmp_path) -> None:
     monkeypatch.chdir(tmp_path)
     assert test_ui_module.build_parser().parse_args([]).yolo_model is None
