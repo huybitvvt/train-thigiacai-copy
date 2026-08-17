@@ -484,6 +484,19 @@ class StationUIService:
             raise RuntimeError("Gemini primary chưa được cấu hình")
         return self.gemini_reader
 
+    def _panel_reader_for(
+        self,
+        profile: str,
+        region_count: int,
+    ) -> tuple[GeminiWeightReader, str]:
+        if (
+            profile == "fast"
+            and region_count >= 5
+            and self.gemini_accurate_reader is not None
+        ):
+            return self.gemini_accurate_reader, "accurate-auto"
+        return self._gemini_reader_for(profile), profile
+
     def replace_gemini_key(self, api_key: str) -> dict[str, object]:
         if self.gemini_key_manager is None:
             raise ValueError("Chức năng đổi Gemini key chưa được cấu hình")
@@ -901,9 +914,16 @@ class StationUIService:
                     "y2": roi.y2,
                 }
             )
-        reader = self._gemini_reader_for(recognition_profile)
+        reader, effective_profile = self._panel_reader_for(
+            recognition_profile,
+            len(cropped),
+        )
         result = reader.read_panel_regions(cropped)
-        return {**result, "regions": normalized}
+        return {
+            **result,
+            "regions": normalized,
+            "recognition_profile": effective_profile,
+        }
 
     def panel_regions(self, station_id: str) -> list[dict[str, object]]:
         station_id = str(station_id).strip()

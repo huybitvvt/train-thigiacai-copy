@@ -1337,6 +1337,61 @@ def test_panel_analysis_crops_all_regions_and_calls_gemini_once(tmp_path) -> Non
     store.close()
 
 
+def test_panel_analysis_uses_long_timeout_reader_once_for_many_regions(tmp_path) -> None:
+    class FakePanelReader:
+        def __init__(self, model):
+            self.model = model
+            self.calls = []
+
+        def read_panel_regions(self, regions):
+            self.calls.append(regions)
+            return {"ok": True, "model": self.model, "readings": []}
+
+        def status(self):
+            return {"enabled": True, "model": self.model}
+
+        def close(self):
+            pass
+
+    fast = FakePanelReader("fast-10s")
+    accurate = FakePanelReader("accurate-30s")
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(
+        store,
+        None,
+        None,
+        None,
+        gemini_reader=fast,
+        gemini_accurate_reader=accurate,
+        weight_engine="gemini",
+    )
+    frame = np.zeros((200, 500, 3), dtype=np.uint8)
+    regions = [
+        {
+            "label": f"Chỉ số {index + 1:02d}",
+            "x1": index * 0.18,
+            "y1": 0.2,
+            "x2": index * 0.18 + 0.15,
+            "y2": 0.5,
+        }
+        for index in range(5)
+    ]
+
+    result = service.analyze_panel_regions(
+        frame,
+        regions,
+        recognition_profile="fast",
+    )
+
+    assert result["recognition_profile"] == "accurate-auto"
+    assert result["model"] == "accurate-30s"
+    assert fast.calls == []
+    assert len(accurate.calls) == 1
+    assert len(accurate.calls[0]) == 5
+    service.close()
+    store.close()
+
+
 def test_panel_detection_normalizes_regions_for_operator_review(tmp_path) -> None:
     class FakePanelDetector:
         def detect_panel_regions(self, frame):
