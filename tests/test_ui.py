@@ -1198,7 +1198,10 @@ def test_ui_records_table_shows_bi_and_nvl_weights() -> None:
     assert 'id="sourceMachine"' in TEST_UI_HTML
     assert 'Máy tái chế' in TEST_UI_HTML
     assert 'Máy cách nhiệt' in TEST_UI_HTML
-    assert 'id="sourceOrder"' in TEST_UI_HTML
+    assert '<select id="sourceOrder" disabled>' in TEST_UI_HTML
+    assert 'placeholder="Nhập lệnh SX"' not in TEST_UI_HTML
+    assert "/api/production-orders?work_date=" in TEST_UI_HTML
+    assert "$('sourceDate').addEventListener('change'" in TEST_UI_HTML
     assert 'id="biWeight"' in TEST_UI_HTML
     assert 'value="0.16"' in TEST_UI_HTML
     assert "Lệnh sản xuất" in TEST_UI_HTML
@@ -1220,6 +1223,41 @@ def test_ui_records_table_shows_bi_and_nvl_weights() -> None:
     assert "SOURCE_MACHINE=Máy Bao Bì" in merged
     assert "SOURCE_PRODUCTION_ORDER=LSX-01" in merged
     assert "BI_WEIGHT=0.16" in merged
+
+
+def test_production_orders_follow_selected_date() -> None:
+    items = [
+        {
+            "work_date": "2026-08-13",
+            "production_order": "LSX-02",
+        },
+        {
+            "metadata": {
+                "work_date": "2026-08-13",
+                "production_order": "LSX-01",
+            }
+        },
+        {
+            "metadata": {
+                "weight_raw": (
+                    "SOURCE_DATE=2026-08-13; "
+                    "SOURCE_PRODUCTION_ORDER=LSX-01"
+                )
+            }
+        },
+        {
+            "work_date": "2026-08-14",
+            "production_order": "LSX-03",
+        },
+    ]
+
+    assert test_ui_module._production_orders_for_date(items, "2026-08-13") == [
+        "LSX-01",
+        "LSX-02",
+    ]
+    assert test_ui_module._matches_source_filters(
+        items[0], work_date="2026-08-13", production_order="LSX-02"
+    )
 
 
 def test_remote_product_image_does_not_request_redundant_signed_url() -> None:
@@ -1304,7 +1342,7 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "if(isProduct){session.productAnalysis=data" in TEST_UI_HTML
     assert "reliableQr=Boolean(data.qr_found&&!data.qr_conflict&&!qrDecoder.startsWith('gemini'))" in TEST_UI_HTML
     assert "if(reliableQr&&String(data.qr_code||'').trim()&&!String(session.qr||'').trim())session.qr=String(data.qr_code).trim()" in TEST_UI_HTML
-    assert "$('analyzeProductBtn').disabled=panelMode||busy||!ready||!coreReady(session)" in TEST_UI_HTML
+    assert "$('analyzeProductBtn').disabled=panelMode||busy||!ready||!sourceChosen||!coreReady(session)" in TEST_UI_HTML
     assert "function coreCaptured(session)" in TEST_UI_HTML
     assert "function sourceReady(session)" in TEST_UI_HTML
     assert "if(isProduct&&!coreReady(session))" in TEST_UI_HTML
@@ -1319,6 +1357,13 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "PRODUCT_WEIGHT=" in TEST_UI_HTML
     assert "function productReady(session)" in TEST_UI_HTML
     assert "ĐÃ CÂN LÕI · CHỜ CÂN SẢN PHẨM" in TEST_UI_HTML
+    assert 'id="weight" type="number" min="0" step="0.001" placeholder="AI tự đọc" readonly' in TEST_UI_HTML
+    assert 'id="productWeight" type="number" min="0" step="0.001" placeholder="AI tự đọc" readonly' in TEST_UI_HTML
+    assert TEST_UI_HTML.count('<span class="kbd">Space</span>') == 2
+    assert "function nextCaptureKind(" in TEST_UI_HTML
+    assert "captureNextWeight()" in TEST_UI_HTML
+    assert "event.key==='p'" not in TEST_UI_HTML
+    assert "event.key==='P'" not in TEST_UI_HTML
     assert "recognitionProvider.value==='codex'?'Codex':'AI'" in TEST_UI_HTML
     assert "function showPostCaptureSource(session)" in TEST_UI_HTML
     assert "showPostCaptureSource(session);" in TEST_UI_HTML
@@ -1357,8 +1402,8 @@ def test_ui_buttons_start_once_and_show_immediate_press_feedback() -> None:
     assert "document.addEventListener('pointerdown'" in TEST_UI_HTML
     assert "bindActionButton('cameraBtn'" in TEST_UI_HTML
     assert "bindActionButton('panelModeBtn'" in TEST_UI_HTML
-    assert "$('analyzeCoreBtn').click()" in TEST_UI_HTML
-    assert "$('analyzeProductBtn').click()" in TEST_UI_HTML
+    assert "function captureNextWeight()" in TEST_UI_HTML
+    assert "if(!button.disabled)button.click()" in TEST_UI_HTML
     assert "$('discardBtn').click()" in TEST_UI_HTML
     assert "$('saveBtn').click()" in TEST_UI_HTML
     assert "Chụp lại cân lõi?" not in TEST_UI_HTML
@@ -1433,7 +1478,7 @@ def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
         "Nhanh · Flash-Lite · 10s",
         "Chính xác · Pro · 30s",
         "savedStationIndex=stations.indexOf(session)",
-        "captureEditor=event.target===captureQr||event.target===weight||event.target===productWeight",
+        "captureEditor=event.target===captureQr||event.target===$('biWeight')",
         "scheduleReconnect(session,session.deviceId)",
         "this.hydratedPending=Boolean(config.event_id)",
         "function pollPendingSessions()",

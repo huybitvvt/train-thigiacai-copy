@@ -102,6 +102,45 @@ def _item_work_date(captured_at: str, weight_raw: str = "") -> str:
     return ""
 
 
+def _item_source_value(item: dict[str, object], field: str, tag: str) -> str:
+    direct = str(item.get(field) or "").strip()
+    if direct:
+        return direct
+    metadata = item.get("metadata")
+    if isinstance(metadata, dict):
+        metadata_value = str(metadata.get(field) or "").strip()
+        if metadata_value:
+            return metadata_value
+        raw = str(metadata.get("weight_raw") or item.get("weight_raw") or "")
+    else:
+        raw = str(item.get("weight_raw") or "")
+    return _raw_tag(raw, tag)
+
+
+def _item_source_date(item: dict[str, object]) -> str:
+    selected = _item_source_value(item, "work_date", "SOURCE_DATE")
+    if selected:
+        return selected
+    metadata = item.get("metadata")
+    raw = (
+        str(metadata.get("weight_raw") or "")
+        if isinstance(metadata, dict)
+        else str(item.get("weight_raw") or "")
+    )
+    return _item_work_date(str(item.get("captured_at") or ""), raw)
+
+
+def _production_orders_for_date(
+    items: list[dict[str, object]], work_date: str
+) -> list[str]:
+    orders = {
+        _item_source_value(item, "production_order", "SOURCE_PRODUCTION_ORDER")
+        for item in items
+        if _item_source_date(item) == work_date
+    }
+    return sorted((order for order in orders if order), key=str.casefold)
+
+
 def _matches_source_filters(
     item: dict[str, object],
     *,
@@ -110,24 +149,25 @@ def _matches_source_filters(
     machine: str = "",
     production_order: str = "",
 ) -> bool:
-    raw = str(item.get("weight_raw") or "")
     if work_date:
-        item_date = _item_work_date(str(item.get("captured_at") or ""), raw)
+        item_date = _item_source_date(item)
         if item_date != work_date:
             return False
     if shift:
-        item_shift = _raw_tag(raw, "SOURCE_SHIFT")
+        item_shift = _item_source_value(item, "shift", "SOURCE_SHIFT")
         if item_shift and item_shift != shift:
             return False
         if not item_shift:
             # Legacy rows without source tags still show for the selected day.
             pass
     if machine:
-        item_machine = _raw_tag(raw, "SOURCE_MACHINE")
+        item_machine = _item_source_value(item, "machine", "SOURCE_MACHINE")
         if item_machine and item_machine != machine:
             return False
     if production_order:
-        item_order = _raw_tag(raw, "SOURCE_PRODUCTION_ORDER")
+        item_order = _item_source_value(
+            item, "production_order", "SOURCE_PRODUCTION_ORDER"
+        )
         if item_order and item_order != production_order:
             return False
     return True
@@ -2102,6 +2142,58 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     },
                 )
                 return
+            if parsed.path == "/api/production-orders":
+                query = urllib.parse.parse_qs(parsed.query)
+                work_date = str(query.get("work_date", [""])[0]).strip()
+                try:
+                    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", work_date):
+                        raise ValueError
+                    time.strptime(work_date, "%Y-%m-%d")
+                except ValueError:
+                    self.send_json(
+                        422,
+                        {
+                            "ok": False,
+                            "error": "invalid_input",
+                            "message": "Ngày chọn LSX không hợp lệ",
+                        },
+                    )
+                    return
+                rows = [
+                    {
+                        "captured_at": item.captured_at,
+                        "weight_raw": item.weight_raw,
+                    }
+                    for item in store.recent(200)
+                ]
+                source = "local"
+                fallback_error = ""
+                supabase_url = _supabase_project_url()
+                publishable_key = _supabase_read_key()
+                if supabase_url and publishable_key:
+                    try:
+                        rows = [
+                            *fetch_supabase_table(
+                                supabase_url,
+                                publishable_key,
+                                limit=200,
+                            ),
+                            *rows,
+                        ]
+                        source = "can_tu_dong"
+                    except Exception as exc:
+                        fallback_error = str(exc)
+                self.send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "source": source,
+                        "work_date": work_date,
+                        "orders": _production_orders_for_date(rows, work_date),
+                        "fallback_error": fallback_error or None,
+                    },
+                )
+                return
             if parsed.path == "/api/measurements":
                 query = urllib.parse.parse_qs(parsed.query)
                 try:
@@ -2209,6 +2301,14 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         ),
                         "unit": item.get("unit", "kg"),
                         "captured_at": item.get("captured_at", ""),
+                        "work_date": _item_source_date(item),
+                        "shift": _item_source_value(item, "shift", "SOURCE_SHIFT"),
+                        "machine": _item_source_value(item, "machine", "SOURCE_MACHINE"),
+                        "production_order": _item_source_value(
+                            item,
+                            "production_order",
+                            "SOURCE_PRODUCTION_ORDER",
+                        ),
                         "sync_status": "synced",
                         "sync_error": None,
                         "core_image_url": core_url,
