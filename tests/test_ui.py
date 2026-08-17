@@ -1337,6 +1337,71 @@ def test_panel_analysis_crops_all_regions_and_calls_gemini_once(tmp_path) -> Non
     store.close()
 
 
+def test_panel_detection_normalizes_regions_for_operator_review(tmp_path) -> None:
+    class FakePanelDetector:
+        def detect_panel_regions(self, frame):
+            assert frame.shape == (200, 400, 3)
+            return {
+                "ok": True,
+                "method": "fake-detection",
+                "regions": [
+                    {
+                        "label": "TEMP",
+                        "x1": 0.1,
+                        "y1": 0.2,
+                        "x2": 0.3,
+                        "y2": 0.4,
+                    },
+                    {
+                        "label": "outside",
+                        "x1": -0.1,
+                        "y1": 0.2,
+                        "x2": 0.3,
+                        "y2": 0.4,
+                    },
+                    {
+                        "label": "TEMP",
+                        "x1": 0.5,
+                        "y1": 0.6,
+                        "x2": 0.7,
+                        "y2": 0.8,
+                    },
+                ],
+            }
+
+        def status(self):
+            return {"enabled": True}
+
+        def close(self):
+            pass
+
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(
+        store,
+        None,
+        None,
+        None,
+        gemini_reader=FakePanelDetector(),
+        weight_engine="gemini",
+    )
+
+    result = service.detect_panel_regions(np.zeros((200, 400, 3), dtype=np.uint8))
+
+    assert result["method"] == "fake-detection"
+    assert result["regions"] == [
+        {"label": "TEMP", "x1": 0.1, "y1": 0.2, "x2": 0.3, "y2": 0.4},
+        {
+            "label": "Chỉ số 03",
+            "x1": 0.5,
+            "y1": 0.6,
+            "x2": 0.7,
+            "y2": 0.8,
+        },
+    ]
+    service.close()
+    store.close()
+
+
 def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "session.qr=data.qr_code||''" not in TEST_UI_HTML
     assert "if(isProduct){session.productAnalysis=data" in TEST_UI_HTML
@@ -1386,13 +1451,17 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "setInterval(loadRecords,15000)" in TEST_UI_HTML
     assert "appStatus.release||'local'" in TEST_UI_HTML
     assert 'id="panelModeBtn"' in TEST_UI_HTML
+    assert 'id="autoDetectPanelBtn"' in TEST_UI_HTML
     assert 'id="drawPanelRegionBtn"' in TEST_UI_HTML
     assert 'id="scanPanelBtn"' in TEST_UI_HTML
+    assert "'/api/panel/detect'" in TEST_UI_HTML
     assert "'/api/panel/analyze'" in TEST_UI_HTML
     assert "'/api/panel/regions'" in TEST_UI_HTML
+    assert "function autoDetectPanelRegions(" in TEST_UI_HTML
+    assert "function mergeDetectedPanelRegions(" in TEST_UI_HTML
     assert "function panelPointerDown(" in TEST_UI_HTML
     assert "function scanPanelRegions(" in TEST_UI_HTML
-    assert "Mỗi vùng chỉ ôm đúng một hàng số đang sáng" in TEST_UI_HTML
+    assert "Tự tìm sẽ khoanh từng hàng số LED đang sáng" in TEST_UI_HTML
     assert "loadPanelRegions(session).then" in TEST_UI_HTML
 
 

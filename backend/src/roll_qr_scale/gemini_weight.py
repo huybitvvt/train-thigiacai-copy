@@ -66,6 +66,26 @@ _GEMINI_PANEL_RESPONSE_SCHEMA = {
     "required": ["readable", "value"],
 }
 
+_GEMINI_PANEL_DETECT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "regions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "x1": {"type": "integer"},
+                    "y1": {"type": "integer"},
+                    "x2": {"type": "integer"},
+                    "y2": {"type": "integer"},
+                },
+                "required": ["x1", "y1", "x2", "y2"],
+            },
+        }
+    },
+    "required": ["regions"],
+}
+
 
 @dataclass(frozen=True)
 class GeminiWeightSuggestion:
@@ -197,8 +217,8 @@ class GeminiWeightReader:
         return encoded.tobytes()
 
     @staticmethod
-    def _panel_evidence(image: np.ndarray) -> np.ndarray:
-        """Place the crop beside a view containing only actively lit LED colors."""
+    def _active_led_isolation(image: np.ndarray) -> np.ndarray:
+        """Keep actively lit red/green segments and suppress panel background."""
         prepared = (
             image[:, :, :3]
             if image.ndim == 3
@@ -219,6 +239,17 @@ class GeminiWeightReader:
         active = (active_red | active_green).astype(np.uint8) * 255
         isolated = np.zeros_like(prepared)
         isolated[active > 0] = prepared[active > 0]
+        return isolated
+
+    @staticmethod
+    def _panel_evidence(image: np.ndarray) -> np.ndarray:
+        """Place the crop beside a view containing only actively lit LED colors."""
+        prepared = (
+            image[:, :, :3]
+            if image.ndim == 3
+            else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        )
+        isolated = GeminiWeightReader._active_led_isolation(prepared)
         divider = np.full((prepared.shape[0], 3, 3), 255, dtype=np.uint8)
         return np.concatenate((prepared, divider, isolated), axis=1)
 
@@ -389,6 +420,157 @@ class GeminiWeightReader:
                 latency,
             )
 
+    def detect_panel_regions(self, image: np.ndarray) -> dict[str, object]:
+        """Locate active digital value rows for operator review before reading."""
+        if not isinstance(image, np.ndarray) or image.size == 0:
+            raise ValueError("Panel image is empty")
+        started = time.perf_counter()
+        with self._lock:
+            self._requests += 1
+        try:
+            from google.genai import types
+
+            prompt = (
+                "Find every distinct actively illuminated numeric value row on this "
+                "industrial control panel. A value row is red or green seven-segment "
+                "digits on a dark digital display. The first image is the original; "
+                "the second has identical geometry but isolates likely active red and "
+                "green segments to help localization. Return one tight bounding box per "
+                "active numeric row, even when the photo or display is rotated, tilted "
+                "or viewed in perspective. Coordinates must use the ORIGINAL image "
+                "orientation and be integers from 0 to 1000: x1=left, y1=top, "
+                "x2=right, y2=bottom. Include all visible active digit segments with a "
+                "small margin. Do not include analog gauges, printed numbers, labels, "
+                "buttons, indicator lamps, unlit displays or an entire controller that "
+                "contains more than one numeric row. Never invent a region. Return at "
+                "most 24 regions."
+            )
+            thinking_config = (
+                types.ThinkingConfig(thinking_level=self.thinking_level)
+                if self.model.startswith("gemini-3")
+                else types.ThinkingConfig(thinking_budget=0)
+            )
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=[
+                    prompt,
+                    types.Part.from_bytes(
+                        data=self._jpeg(image),
+                        mime_type="image/jpeg",
+                        media_resolution=(
+                            f"MEDIA_RESOLUTION_{self.media_resolution.upper()}"
+                        ),
+                    ),
+                    types.Part.from_bytes(
+                        data=self._jpeg(self._active_led_isolation(image)),
+                        mime_type="image/jpeg",
+                        media_resolution=(
+                            f"MEDIA_RESOLUTION_{self.media_resolution.upper()}"
+                        ),
+                    ),
+                ],
+                config=types.GenerateContentConfig(
+                    max_output_tokens=1200,
+                    response_mime_type="application/json",
+                    response_schema=_GEMINI_PANEL_DETECT_SCHEMA,
+                    thinking_config=thinking_config,
+                ),
+            )
+            parsed = getattr(response, "parsed", None)
+            if not isinstance(parsed, dict):
+                text = str(getattr(response, "text", "") or "").strip()
+                parsed = json.loads(text) if text else None
+            if not isinstance(parsed, dict) or not isinstance(parsed.get("regions"), list):
+                raise ValueError("Gemini returned an invalid panel detection response")
+            boxes: list[tuple[int, int, int, int]] = []
+            for item in parsed["regions"][:48]:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    x1, y1, x2, y2 = (
+                        int(item["x1"]),
+                        int(item["y1"]),
+                        int(item["x2"]),
+                        int(item["y2"]),
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(1000, x2), min(1000, y2)
+                if x2 - x1 < 8 or y2 - y1 < 8:
+                    continue
+                pad_x = max(4, round((x2 - x1) * 0.08))
+                pad_y = max(4, round((y2 - y1) * 0.12))
+                candidate = (
+                    max(0, x1 - pad_x),
+                    max(0, y1 - pad_y),
+                    min(1000, x2 + pad_x),
+                    min(1000, y2 + pad_y),
+                )
+                if any(self._box_iou(candidate, existing) >= 0.65 for existing in boxes):
+                    continue
+                boxes.append(candidate)
+            boxes.sort(key=lambda box: ((box[1] + box[3]) // 2, (box[0] + box[2]) // 2))
+            boxes = boxes[:24]
+            regions = [
+                {
+                    "label": f"Chỉ số {index:02d}",
+                    "x1": round(x1 / 1000, 5),
+                    "y1": round(y1 / 1000, 5),
+                    "x2": round(x2 / 1000, 5),
+                    "y2": round(y2 / 1000, 5),
+                }
+                for index, (x1, y1, x2, y2) in enumerate(boxes, start=1)
+            ]
+            latency = time.perf_counter() - started
+            usage = getattr(response, "usage_metadata", None)
+            input_tokens = int(getattr(usage, "prompt_token_count", 0) or 0)
+            output_tokens = int(getattr(usage, "candidates_token_count", 0) or 0)
+            thinking_tokens = int(getattr(usage, "thoughts_token_count", 0) or 0)
+            total_tokens = int(getattr(usage, "total_token_count", 0) or 0)
+            with self._lock:
+                self._last_latency_seconds = latency
+                self._last_error = None
+                self._input_tokens += input_tokens
+                self._output_tokens += output_tokens
+                self._thinking_tokens += thinking_tokens
+                if regions:
+                    self._successes += 1
+                else:
+                    self._failures += 1
+            return {
+                "ok": True,
+                "regions": regions,
+                "latency_seconds": latency,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "thinking_tokens": thinking_tokens,
+                "total_tokens": total_tokens,
+                "model": self.model,
+                "method": "gemini-active-display-detection",
+            }
+        except Exception as exc:
+            latency = time.perf_counter() - started
+            error = self._safe_error(exc)
+            with self._lock:
+                self._failures += 1
+                self._last_latency_seconds = latency
+                self._last_error = error
+            raise RuntimeError(error) from exc
+
+    @staticmethod
+    def _box_iou(
+        left: tuple[int, int, int, int], right: tuple[int, int, int, int]
+    ) -> float:
+        intersection_width = max(0, min(left[2], right[2]) - max(left[0], right[0]))
+        intersection_height = max(0, min(left[3], right[3]) - max(left[1], right[1]))
+        intersection = intersection_width * intersection_height
+        if not intersection:
+            return 0.0
+        left_area = (left[2] - left[0]) * (left[3] - left[1])
+        right_area = (right[2] - right[0]) * (right[3] - right[1])
+        return intersection / max(1, left_area + right_area - intersection)
+
     def read_panel_regions(
         self,
         regions: list[tuple[str, np.ndarray]],
@@ -432,7 +614,8 @@ class GeminiWeightReader:
                 )
                 + ". Each image has the original crop on the left and, after a white "
                 "divider, an active-color isolation on the right. For each named "
-                "display, transcribe only digit segments that are "
+                "display, first account for any 90-degree rotation, then transcribe "
+                "only digit segments that are "
                 "actively illuminated red or green. Ignore every gray/unlit ghost "
                 "segment, printed label, setpoint row, status lamp, button and keypad. "
                 "Preserve the visible decimal point and minus sign exactly; never add "

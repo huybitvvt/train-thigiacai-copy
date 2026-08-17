@@ -804,6 +804,58 @@ class StationUIService:
             )
         return {"image_path": str(image_path.resolve()), "metadata_path": str(metadata_path.resolve())}
 
+    def detect_panel_regions(
+        self,
+        frame: np.ndarray,
+        *,
+        recognition_profile: str = "fast",
+    ) -> dict[str, object]:
+        reader = self._gemini_reader_for(recognition_profile)
+        detector = getattr(reader, "detect_panel_regions", None)
+        if detector is None:
+            raise ValueError("Gemini hiện tại chưa hỗ trợ tự tìm màn hình")
+        result = detector(frame)
+        items = result.get("regions") if isinstance(result, dict) else None
+        if not isinstance(items, list):
+            raise RuntimeError("Kết quả tự tìm màn hình không hợp lệ")
+        normalized: list[dict[str, object]] = []
+        labels: set[str] = set()
+        for index, item in enumerate(items[:24], start=1):
+            if not isinstance(item, dict):
+                continue
+            try:
+                x1, y1, x2, y2 = (
+                    float(item["x1"]),
+                    float(item["y1"]),
+                    float(item["x2"]),
+                    float(item["y2"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not (0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1):
+                continue
+            if x2 - x1 < 0.008 or y2 - y1 < 0.008:
+                continue
+            label = str(item.get("label") or f"Chỉ số {index:02d}").strip()[:80]
+            if not label or label.casefold() in labels:
+                base = f"Chỉ số {index:02d}"
+                label = base
+                suffix = 2
+                while label.casefold() in labels:
+                    label = f"{base} {suffix}"
+                    suffix += 1
+            labels.add(label.casefold())
+            normalized.append(
+                {
+                    "label": label,
+                    "x1": round(x1, 5),
+                    "y1": round(y1, 5),
+                    "x2": round(x2, 5),
+                    "y2": round(y2, 5),
+                }
+            )
+        return {**result, "regions": normalized}
+
     def analyze_panel_regions(
         self,
         frame: np.ndarray,
@@ -2405,6 +2457,17 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     )
                     return
                 frame = decode_image(str(payload.get("image", "")))
+                if self.path == "/api/panel/detect":
+                    self.send_json(
+                        200,
+                        service.detect_panel_regions(
+                            frame,
+                            recognition_profile=str(
+                                payload.get("recognition_profile", "fast")
+                            ),
+                        ),
+                    )
+                    return
                 if self.path == "/api/panel/analyze":
                     self.send_json(
                         200,

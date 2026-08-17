@@ -194,6 +194,45 @@ def test_panel_reader_sends_all_named_regions_in_one_request() -> None:
     assert "gray/unlit ghost segment" in client.models.calls[0]["contents"][0]
 
 
+def test_panel_detector_returns_sorted_distinct_active_display_rows() -> None:
+    client = FakeClient({
+        "regions": [
+            {"x1": 500, "y1": 100, "x2": 620, "y2": 160},
+            {"x1": 100, "y1": 200, "x2": 200, "y2": 300},
+            {"x1": 103, "y1": 202, "x2": 198, "y2": 298},
+            {"x1": 50, "y1": 50, "x2": 52, "y2": 53},
+        ]
+    })
+    reader = GeminiWeightReader("secret-key", client=client)
+
+    result = reader.detect_panel_regions(np.zeros((600, 800, 3), dtype=np.uint8))
+
+    assert result["method"] == "gemini-active-display-detection"
+    assert result["regions"] == [
+        {
+            "label": "Chỉ số 01",
+            "x1": 0.49,
+            "y1": 0.093,
+            "x2": 0.63,
+            "y2": 0.167,
+        },
+        {
+            "label": "Chỉ số 02",
+            "x1": 0.092,
+            "y1": 0.188,
+            "x2": 0.208,
+            "y2": 0.312,
+        },
+    ]
+    assert len(client.models.calls) == 1
+    assert len(client.models.calls[0]["contents"]) == 3
+    assert "ORIGINAL image orientation" in client.models.calls[0]["contents"][0]
+    assert "analog gauges" in client.models.calls[0]["contents"][0]
+    assert client.models.calls[0]["config"].response_schema["required"] == [
+        "regions"
+    ]
+
+
 def test_panel_reader_rejects_invalid_or_guessed_value() -> None:
     client = FakeClient({"region_01": {"readable": True, "value": "TEMP 229 C"}})
     reader = GeminiWeightReader("secret-key", client=client)
