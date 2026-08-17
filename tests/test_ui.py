@@ -1411,6 +1411,18 @@ def test_ui_buttons_start_once_and_show_immediate_press_feedback() -> None:
     assert "Chụp lại cân lõi?" not in TEST_UI_HTML
 
 
+def test_ui_zooms_scale_view_without_cropping_capture_frame() -> None:
+    assert 'class="media-layer"' in TEST_UI_HTML
+    assert 'class="view-zoom-controls"' in TEST_UI_HTML
+    assert "const VIEW_ZOOM_LEVELS=[1,1.5,2,3,4]" in TEST_UI_HTML
+    assert "function setupViewZoom(session)" in TEST_UI_HTML
+    assert "function focusViewZoom(session,event)" in TEST_UI_HTML
+    assert "session.box.addEventListener('wheel'" in TEST_UI_HTML
+    assert "session.box.addEventListener('dblclick'" in TEST_UI_HTML
+    assert "session.zoomLayer.style.transform='scale('+level+')'" in TEST_UI_HTML
+    assert "drawImage(source,0,0,targetWidth,targetHeight)" in TEST_UI_HTML
+
+
 def test_ui_enables_local_yolo_model_by_default(monkeypatch, tmp_path) -> None:
     monkeypatch.chdir(tmp_path)
     assert test_ui_module.build_parser().parse_args([]).yolo_model is None
