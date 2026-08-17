@@ -1337,7 +1337,7 @@ def test_panel_analysis_crops_all_regions_and_calls_gemini_once(tmp_path) -> Non
     store.close()
 
 
-def test_panel_analysis_uses_long_timeout_reader_once_for_many_regions(tmp_path) -> None:
+def test_panel_analysis_keeps_fast_reader_for_many_regions(tmp_path) -> None:
     class FakePanelReader:
         def __init__(self, model):
             self.model = model
@@ -1383,11 +1383,11 @@ def test_panel_analysis_uses_long_timeout_reader_once_for_many_regions(tmp_path)
         recognition_profile="fast",
     )
 
-    assert result["recognition_profile"] == "accurate-auto"
-    assert result["model"] == "accurate-30s"
-    assert fast.calls == []
-    assert len(accurate.calls) == 1
-    assert len(accurate.calls[0]) == 5
+    assert result["recognition_profile"] == "fast"
+    assert result["model"] == "fast-10s"
+    assert len(fast.calls) == 1
+    assert len(fast.calls[0]) == 5
+    assert accurate.calls == []
     service.close()
     store.close()
 
@@ -1613,8 +1613,8 @@ def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
         'id="analyzeProductBtn"',
         'id="productWeight"',
         "analyzeCurrent('product')",
-        "Nhanh · Flash-Lite · 10s",
-        "Chính xác · Pro · 30s",
+        "Nhanh · Flash-Lite · có Free tier",
+        "Chính xác · Pro · cần trả phí",
         "savedStationIndex=stations.indexOf(session)",
         "captureEditor=event.target===captureQr||event.target===$('biWeight')",
         "scheduleReconnect(session,session.deviceId)",

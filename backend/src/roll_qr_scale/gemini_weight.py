@@ -253,6 +253,71 @@ class GeminiWeightReader:
         divider = np.full((prepared.shape[0], 3, 3), 255, dtype=np.uint8)
         return np.concatenate((prepared, divider, isolated), axis=1)
 
+    @classmethod
+    def _panel_contact_sheet(
+        cls,
+        regions: list[tuple[str, np.ndarray]],
+    ) -> np.ndarray:
+        """Pack many LED crops into one indexed image to reduce Gemini media work."""
+        count = len(regions)
+        if not count:
+            raise ValueError("Panel contact sheet requires at least one region")
+        columns = min(4, max(2, math.ceil(math.sqrt(count * 0.6))))
+        rows = math.ceil(count / columns)
+        cell_width, cell_height = 500, 260
+        header_height, padding, gap = 30, 10, 8
+        sheet = np.full(
+            (
+                gap + rows * (cell_height + gap),
+                gap + columns * (cell_width + gap),
+                3,
+            ),
+            238,
+            dtype=np.uint8,
+        )
+        for index, (_, image) in enumerate(regions, start=1):
+            row, column = divmod(index - 1, columns)
+            left = gap + column * (cell_width + gap)
+            top = gap + row * (cell_height + gap)
+            right, bottom = left + cell_width, top + cell_height
+            sheet[top:bottom, left:right] = 12
+            sheet[top : top + header_height, left:right] = (150, 70, 20)
+            cv2.putText(
+                sheet,
+                f"R{index:02d}",
+                (left + 10, top + 22),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.62,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
+            evidence = cls._panel_evidence(image)
+            available_width = cell_width - 2 * padding
+            available_height = cell_height - header_height - 2 * padding
+            scale = min(
+                available_width / evidence.shape[1],
+                available_height / evidence.shape[0],
+                4.0,
+            )
+            target_width = max(1, round(evidence.shape[1] * scale))
+            target_height = max(1, round(evidence.shape[0] * scale))
+            resized = cv2.resize(
+                evidence,
+                (target_width, target_height),
+                interpolation=cv2.INTER_CUBIC if scale > 1 else cv2.INTER_AREA,
+            )
+            image_left = left + (cell_width - target_width) // 2
+            image_top = top + header_height + (
+                cell_height - header_height - target_height
+            ) // 2
+            sheet[
+                image_top : image_top + target_height,
+                image_left : image_left + target_width,
+            ] = resized
+            cv2.rectangle(sheet, (left, top), (right - 1, bottom - 1), (255, 255, 255), 2)
+        return sheet
+
     @staticmethod
     def _payload(response: object) -> _GeminiScalePayload:
         parsed = getattr(response, "parsed", None)
@@ -605,17 +670,35 @@ class GeminiWeightReader:
                 },
                 "required": region_keys,
             }
-            prompt = (
-                "Each following image is one separately cropped industrial digital "
-                "controller value row. The images appear in this exact order: "
-                + ", ".join(
-                    f"{key}={json.dumps(label, ensure_ascii=False)}"
-                    for key, label in zip(region_keys, labels, strict=True)
+            use_contact_sheet = len(regions) >= 5
+            mapping = ", ".join(
+                f"{key}={json.dumps(label, ensure_ascii=False)}"
+                for key, label in zip(region_keys, labels, strict=True)
+            )
+            if use_contact_sheet:
+                image_description = (
+                    "The single following contact-sheet image contains separately "
+                    "cropped industrial digital controller value rows. Cells are in "
+                    "left-to-right, top-to-bottom order. Blue header R01 maps to "
+                    "region_01, R02 to region_02, and so on; headers are indexes, not "
+                    "display values. The region mapping is: "
+                    + mapping
+                    + ". Each cell has the original crop on the left and, after a "
+                    "white divider, an active-color isolation on the right. "
                 )
-                + ". Each image has the original crop on the left and, after a white "
-                "divider, an active-color isolation on the right. For each named "
-                "display, first account for any 90-degree rotation, then transcribe "
-                "only digit segments that are "
+            else:
+                image_description = (
+                    "Each following image is one separately cropped industrial "
+                    "digital controller value row. The images appear in this exact "
+                    "order: "
+                    + mapping
+                    + ". Each image has the original crop on the left and, after a "
+                    "white divider, an active-color isolation on the right. "
+                )
+            prompt = (
+                image_description
+                + "For each named display, first account for any 90-degree rotation, "
+                "then transcribe only digit segments that are "
                 "actively illuminated red or green. Ignore every gray/unlit ghost "
                 "segment, printed label, setpoint row, status lamp, button and keypad. "
                 "Preserve the visible decimal point and minus sign exactly; never add "
@@ -625,16 +708,21 @@ class GeminiWeightReader:
                 "Never guess. Return one object for every supplied region key."
             )
             contents: list[object] = [prompt]
+            panel_images = (
+                [self._panel_contact_sheet(regions)]
+                if use_contact_sheet
+                else [self._panel_evidence(image) for _, image in regions]
+            )
             contents.extend(
                 types.Part.from_bytes(
-                    data=self._jpeg(self._panel_evidence(image)),
+                    data=self._jpeg(image),
                     mime_type="image/jpeg",
                     media_resolution=f"MEDIA_RESOLUTION_{self.media_resolution.upper()}",
                 )
-                for _, image in regions
+                for image in panel_images
             )
             thinking_config = (
-                types.ThinkingConfig(thinking_level=self.thinking_level)
+                types.ThinkingConfig(thinking_level="minimal")
                 if self.model.startswith("gemini-3")
                 else types.ThinkingConfig(thinking_budget=0)
             )
@@ -700,6 +788,8 @@ class GeminiWeightReader:
                 "thinking_tokens": thinking_tokens,
                 "total_tokens": total_tokens,
                 "model": self.model,
+                "contact_sheet": use_contact_sheet,
+                "input_images": len(panel_images),
             }
         except Exception as exc:
             latency = time.perf_counter() - started

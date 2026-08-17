@@ -194,6 +194,43 @@ def test_panel_reader_sends_all_named_regions_in_one_request() -> None:
     assert "gray/unlit ghost segment" in client.models.calls[0]["contents"][0]
 
 
+def test_panel_reader_packs_many_regions_into_one_image_with_minimal_thinking() -> None:
+    payload = {
+        f"region_{index:02d}": {"readable": True, "value": str(index)}
+        for index in range(1, 13)
+    }
+    client = FakeClient(payload)
+    reader = GeminiWeightReader(
+        "secret-key",
+        client=client,
+        model="gemini-3.1-pro-preview",
+        thinking_level="medium",
+        max_image_edge=1600,
+    )
+    regions = [
+        (
+            f"Chỉ số {index:02d}",
+            np.full((45, 90, 3), (20, 20, 180), dtype=np.uint8),
+        )
+        for index in range(1, 13)
+    ]
+
+    result = reader.read_panel_regions(regions)
+
+    assert result["contact_sheet"] is True
+    assert result["input_images"] == 1
+    assert len(result["readings"]) == 12
+    call = client.models.calls[0]
+    assert len(call["contents"]) == 2  # prompt + one indexed contact sheet
+    encoded = np.frombuffer(call["contents"][1].inline_data.data, dtype=np.uint8)
+    contact_sheet = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+    assert contact_sheet.shape[0] > 900
+    assert contact_sheet.shape[1] > 1400
+    assert max(contact_sheet.shape[:2]) <= 1600
+    assert call["config"].thinking_config.thinking_level.value == "MINIMAL"
+    assert "Blue header R01" in call["contents"][0]
+
+
 def test_panel_detector_returns_sorted_distinct_active_display_rows() -> None:
     client = FakeClient({
         "regions": [
