@@ -231,6 +231,25 @@ def test_panel_reader_packs_many_regions_into_one_image_with_minimal_thinking() 
     assert "Blue header R01" in call["contents"][0]
 
 
+def test_panel_reader_uses_low_as_gemini_37_minimum_thinking_level() -> None:
+    client = FakeClient({
+        "region_01": {"readable": True, "value": "1304"},
+    })
+    reader = GeminiWeightReader(
+        "secret-key",
+        client=client,
+        model="gemini-3.7-flash",
+        thinking_level="low",
+    )
+
+    reader.read_panel_regions([
+        ("Cân", np.zeros((40, 80, 3), dtype=np.uint8)),
+    ])
+
+    config = client.models.calls[0]["config"]
+    assert config.thinking_config.thinking_level.value == "LOW"
+
+
 def test_panel_detector_returns_sorted_distinct_active_display_rows() -> None:
     client = FakeClient({
         "regions": [

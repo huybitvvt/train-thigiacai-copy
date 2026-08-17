@@ -39,8 +39,10 @@ def manager(store, initial="environment-key-value"):
     return GeminiKeyManager(
         store,
         fast_model="fast-model",
+        flash37_model="flash37-model",
         accurate_model="accurate-model",
         fast_timeout=10,
+        flash37_timeout=30,
         accurate_timeout=30,
         initial_key=initial,
         reader_factory=FakeReader,
@@ -61,13 +63,15 @@ def test_load_falls_back_to_environment_when_supabase_is_temporarily_down() -> N
     assert "network down" in str(current.status()["last_error"])
 
 
-def test_replace_validates_before_persisting_and_creates_both_readers(monkeypatch) -> None:
+def test_replace_validates_before_persisting_and_creates_all_readers(monkeypatch) -> None:
     store = MemoryStore()
     current = manager(store)
     monkeypatch.setattr(current, "validate", lambda key: None)
-    fast, accurate = current.replace("new-key-value-123456789")
+    fast, flash37, accurate = current.replace("new-key-value-123456789")
     assert store.value == {"api_key": "new-key-value-123456789", "provider": "gemini"}
     assert fast.kwargs["model"] == "fast-model"
+    assert flash37.kwargs["model"] == "flash37-model"
+    assert flash37.kwargs["thinking_level"] == "low"
     assert accurate.kwargs["model"] == "accurate-model"
     assert current.status()["stored_encrypted"] is True
     assert current.status()["key_id"] == current.key_id("new-key-value-123456789")
@@ -86,7 +90,7 @@ def test_replace_keeps_new_readers_out_when_store_fails(monkeypatch) -> None:
     current.reader_factory = create
     with pytest.raises(RuntimeError, match="write failed"):
         current.replace("new-key-value-123456789")
-    assert len(created) == 2
+    assert len(created) == 3
     assert all(item.closed for item in created)
 
 

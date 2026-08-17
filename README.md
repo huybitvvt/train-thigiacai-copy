@@ -273,10 +273,19 @@ Không đặt API key trên dòng lệnh hoặc trong JavaScript. Với source/d
 $env:ROLL_SCALE_GEMINI_API_KEY = "YOUR_GOOGLE_AI_STUDIO_KEY"
 $env:ROLL_SCALE_WEIGHT_ENGINE = "gemini"
 $env:ROLL_SCALE_GEMINI_MODEL = "gemini-3.5-flash-lite"
+$env:ROLL_SCALE_GEMINI_37_MODEL = "gemini-3.7-flash"
 $env:ROLL_SCALE_GEMINI_ACCURATE_MODEL = "gemini-3.1-pro-preview"
 $env:ROLL_SCALE_GEMINI_TIMEOUT = "10.0"
+$env:ROLL_SCALE_GEMINI_37_TIMEOUT = "30.0"
+$env:ROLL_SCALE_GEMINI_ACCURATE_TIMEOUT = "30.0"
 .\.venv\Scripts\roll-test-ui.exe
 ```
+
+Giao diện có ba profile Gemini độc lập: `fast` dùng Gemini 3.5 Flash-Lite với
+thinking `minimal`; `flash37` dùng Gemini 3.7 Flash với thinking `low`; và
+`accurate` dùng model Pro với thinking `medium`. Flash-Lite vẫn là mặc định.
+Lựa chọn model không thay đổi luồng QR độc lập hoặc quy tắc chỉ gửi Supabase
+sau khi đủ hai ảnh cân và mã sản phẩm.
 
 `ROLL_SCALE_WEIGHT_ENGINE` có ba chế độ: `local` chỉ dùng Paddle, `hybrid`
 dùng Paddle trước rồi Gemini xác nhận ứng viên local, và `gemini` dùng Gemini

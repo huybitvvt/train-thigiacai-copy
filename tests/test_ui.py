@@ -1052,7 +1052,7 @@ def test_browser_qr_is_accepted_but_decoder_conflict_requires_manual_code(tmp_pa
     assert conflict["qr_conflict"] is True
 
 
-def test_gemini_accurate_profile_uses_accurate_reader(tmp_path) -> None:
+def test_gemini_profiles_use_their_configured_readers(tmp_path) -> None:
     class FakeGeminiReader:
         def __init__(self, model, value):
             self.model = model
@@ -1079,6 +1079,7 @@ def test_gemini_accurate_profile_uses_accurate_reader(tmp_path) -> None:
             pass
 
     fast = FakeGeminiReader("gemini-3.5-flash-lite", 7.02)
+    flash37 = FakeGeminiReader("gemini-3.7-flash", 9.03)
     accurate = FakeGeminiReader("gemini-3.1-pro-preview", 13.04)
     store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
     service = StationUIService(
@@ -1087,10 +1088,17 @@ def test_gemini_accurate_profile_uses_accurate_reader(tmp_path) -> None:
         None,
         None,
         gemini_reader=fast,
+        gemini_flash37_reader=flash37,
         gemini_accurate_reader=accurate,
         weight_engine="gemini",
     )
 
+    flash37_result = service.analyze(
+        make_qr_frame("ROLL-PROFILE-37"),
+        "auto",
+        "kg",
+        recognition_profile="flash37",
+    )
     result = service.analyze(
         make_qr_frame("ROLL-PROFILE"),
         "auto",
@@ -1101,11 +1109,15 @@ def test_gemini_accurate_profile_uses_accurate_reader(tmp_path) -> None:
     status = service.status()
     service.close()
     store.close()
+    assert flash37_result["weight"] == pytest.approx(9.03)
+    assert flash37_result["recognition_profile"] == "flash37"
     assert result["weight"] == pytest.approx(13.04)
     assert result["recognition_profile"] == "accurate"
     assert fast.calls == 0
+    assert flash37.calls == 1
     assert accurate.calls == 1
     assert status["recognition_profiles"]["fast"]["model"] == "gemini-3.5-flash-lite"
+    assert status["recognition_profiles"]["flash37"]["model"] == "gemini-3.7-flash"
     assert status["recognition_profiles"]["accurate"]["model"] == "gemini-3.1-pro-preview"
 
 
@@ -1576,6 +1588,8 @@ def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
     assert args.gemini_fallback is False
     assert args.gemini_timeout == pytest.approx(10.0)
     assert args.gemini_model == "gemini-3.5-flash-lite"
+    assert args.gemini_37_model == "gemini-3.7-flash"
+    assert args.gemini_37_timeout == pytest.approx(30.0)
     assert args.gemini_accurate_model == "gemini-3.1-pro-preview"
     assert args.gemini_accurate_timeout == pytest.approx(30.0)
     assert args.codex_enabled is True
@@ -1613,7 +1627,8 @@ def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
         'id="analyzeProductBtn"',
         'id="productWeight"',
         "analyzeCurrent('product')",
-        "Nhanh · Flash-Lite · có Free tier",
+        "Nhanh · 3.5 Flash-Lite · Free",
+        "Cân bằng · 3.7 Flash · Low · Free",
         "Chính xác · Pro · cần trả phí",
         "savedStationIndex=stations.indexOf(session)",
         "captureEditor=event.target===captureQr||event.target===$('biWeight')",

@@ -9,23 +9,27 @@ from .gemini_weight import GeminiWeightReader
 
 
 class GeminiKeyManager:
-    """Validate, encrypt and hot-swap the two Gemini readers as one unit."""
+    """Validate, encrypt and hot-swap all Gemini profile readers as one unit."""
 
     def __init__(
         self,
         store: EncryptedCodexTokenStore,
         *,
         fast_model: str,
+        flash37_model: str,
         accurate_model: str,
         fast_timeout: float,
+        flash37_timeout: float,
         accurate_timeout: float,
         initial_key: str,
         reader_factory: Callable[..., GeminiWeightReader] = GeminiWeightReader,
     ) -> None:
         self.store = store
         self.fast_model = fast_model
+        self.flash37_model = flash37_model
         self.accurate_model = accurate_model
         self.fast_timeout = float(fast_timeout)
+        self.flash37_timeout = float(flash37_timeout)
         self.accurate_timeout = float(accurate_timeout)
         self.initial_key = initial_key.strip()
         self.reader_factory = reader_factory
@@ -56,32 +60,54 @@ class GeminiKeyManager:
         self._key_id = self.key_id(self.initial_key)
         return self.initial_key
 
-    def create_readers(self, api_key: str) -> tuple[GeminiWeightReader, GeminiWeightReader]:
-        fast = self.reader_factory(
-            api_key,
-            model=self.fast_model,
-            timeout_seconds=self.fast_timeout,
-            thinking_level="minimal",
-            max_image_edge=1280,
-            jpeg_quality=86,
-            media_resolution="medium",
-            include_qr=False,
-        )
+    def create_readers(
+        self,
+        api_key: str,
+    ) -> tuple[GeminiWeightReader, GeminiWeightReader, GeminiWeightReader]:
+        readers: list[GeminiWeightReader] = []
         try:
-            accurate = self.reader_factory(
-                api_key,
-                model=self.accurate_model,
-                timeout_seconds=self.accurate_timeout,
-                thinking_level="medium",
-                max_image_edge=1600,
-                jpeg_quality=90,
-                media_resolution="high",
-                include_qr=False,
+            readers.append(
+                self.reader_factory(
+                    api_key,
+                    model=self.fast_model,
+                    timeout_seconds=self.fast_timeout,
+                    thinking_level="minimal",
+                    max_image_edge=1600,
+                    jpeg_quality=90,
+                    media_resolution="high",
+                    include_qr=False,
+                )
+            )
+            readers.append(
+                self.reader_factory(
+                    api_key,
+                    model=self.flash37_model,
+                    timeout_seconds=self.flash37_timeout,
+                    thinking_level="low",
+                    max_image_edge=1600,
+                    jpeg_quality=90,
+                    media_resolution="high",
+                    include_qr=False,
+                )
+            )
+            readers.append(
+                self.reader_factory(
+                    api_key,
+                    model=self.accurate_model,
+                    timeout_seconds=self.accurate_timeout,
+                    thinking_level="medium",
+                    max_image_edge=1600,
+                    jpeg_quality=90,
+                    media_resolution="high",
+                    include_qr=False,
+                )
             )
         except Exception:
-            fast.close()
+            for reader in readers:
+                reader.close()
             raise
-        return fast, accurate
+        fast, flash37, accurate = readers
+        return fast, flash37, accurate
 
     @staticmethod
     def _validate_format(api_key: str) -> str:
@@ -108,15 +134,18 @@ class GeminiKeyManager:
         finally:
             client.close()
 
-    def replace(self, api_key: str) -> tuple[GeminiWeightReader, GeminiWeightReader]:
+    def replace(
+        self,
+        api_key: str,
+    ) -> tuple[GeminiWeightReader, GeminiWeightReader, GeminiWeightReader]:
         value = self._validate_format(api_key)
         self.validate(value)
         readers = self.create_readers(value)
         try:
             self.store.write({"api_key": value, "provider": "gemini"})
         except Exception:
-            readers[0].close()
-            readers[1].close()
+            for reader in readers:
+                reader.close()
             raise
         with self._lock:
             self._source = "supabase-encrypted"

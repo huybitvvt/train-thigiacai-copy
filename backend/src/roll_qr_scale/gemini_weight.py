@@ -13,8 +13,10 @@ from pydantic import BaseModel, ConfigDict
 
 
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
+DEFAULT_GEMINI_37_MODEL = "gemini-3.7-flash"
 DEFAULT_GEMINI_ACCURATE_MODEL = "gemini-3.1-pro-preview"
 DEFAULT_GEMINI_TIMEOUT_SECONDS = 10.0
+DEFAULT_GEMINI_37_TIMEOUT_SECONDS = 30.0
 DEFAULT_GEMINI_ACCURATE_TIMEOUT_SECONDS = 30.0
 DEFAULT_GEMINI_MAX_IMAGE_EDGE = 1280
 DEFAULT_GEMINI_JPEG_QUALITY = 86
@@ -333,6 +335,11 @@ class GeminiWeightReader:
     def _safe_error(self, exc: Exception) -> str:
         message = str(exc).replace(self.api_key, "[redacted]").strip()
         return f"{type(exc).__name__}: {message}"[:240]
+
+    def _minimum_thinking_level(self) -> str:
+        if self.model.startswith(("gemini-3.6", "gemini-3.7")):
+            return "low"
+        return "minimal"
 
     def read(
         self,
@@ -722,7 +729,7 @@ class GeminiWeightReader:
                 for image in panel_images
             )
             thinking_config = (
-                types.ThinkingConfig(thinking_level="minimal")
+                types.ThinkingConfig(thinking_level=self._minimum_thinking_level())
                 if self.model.startswith("gemini-3")
                 else types.ThinkingConfig(thinking_budget=0)
             )
