@@ -12,15 +12,16 @@ class IngestResponseError(RuntimeError):
     """The cloud did not acknowledge the exact event that was sent."""
 
 
-def fetch_remote_measurements(
+def fetch_remote_json(
     url: str,
     token: str,
     *,
-    limit: int = 50,
+    params: dict[str, object] | None = None,
     timeout: float = 10.0,
-) -> list[dict[str, object]]:
+) -> dict[str, object]:
     separator = "&" if "?" in url else "?"
-    request_url = f"{url}{separator}{urllib.parse.urlencode({'limit': max(1, min(limit, 200))})}"
+    query = urllib.parse.urlencode(params or {})
+    request_url = f"{url}{separator}{query}" if query else url
     request = urllib.request.Request(
         request_url,
         headers={"Accept": "application/json", "X-Device-Token": token},
@@ -28,12 +29,56 @@ def fetch_remote_measurements(
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
         parsed = json.loads(response.read().decode("utf-8"))
-    if not isinstance(parsed, dict) or parsed.get("ok") is not True:
+    if not isinstance(parsed, dict):
+        raise RuntimeError("Supabase response is invalid")
+    return parsed
+
+
+def fetch_remote_measurements(
+    url: str,
+    token: str,
+    *,
+    limit: int = 50,
+    timeout: float = 10.0,
+) -> list[dict[str, object]]:
+    parsed = fetch_remote_json(
+        url, token, params={"limit": max(1, min(limit, 200))}, timeout=timeout
+    )
+    if parsed.get("ok") is not True:
         raise RuntimeError("Supabase list response is invalid")
     items = parsed.get("items")
     if not isinstance(items, list):
         raise RuntimeError("Supabase list response has no items")
     return [item for item in items if isinstance(item, dict)]
+
+
+def fetch_supabase_rows(
+    supabase_url: str,
+    publishable_key: str,
+    table: str,
+    *,
+    limit: int = 500,
+    timeout: float = 10.0,
+) -> list[dict[str, object]]:
+    query = urllib.parse.urlencode({
+        "select": "*",
+        "limit": max(1, min(limit, 1000)),
+    })
+    encoded_table = urllib.parse.quote(table, safe="")
+    request = urllib.request.Request(
+        f"{supabase_url.rstrip('/')}/rest/v1/{encoded_table}?{query}",
+        headers={
+            "Accept": "application/json",
+            "apikey": publishable_key,
+            "Authorization": f"Bearer {publishable_key}",
+        },
+        method="GET",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        parsed = json.loads(response.read().decode("utf-8"))
+    if not isinstance(parsed, list):
+        raise RuntimeError(f"Supabase {table} response is invalid")
+    return [item for item in parsed if isinstance(item, dict)]
 
 
 def fetch_supabase_table(

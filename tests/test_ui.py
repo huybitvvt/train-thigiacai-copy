@@ -1182,6 +1182,8 @@ def test_ui_uses_viet_nhat_red_black_roboto_branding() -> None:
     assert '<img class="brand-mark" src="/logo.jpg" alt="Việt Nhật IPT">' in TEST_UI_HTML
     assert "font-family:Roboto" in TEST_UI_HTML
     assert 'local("Roboto Regular")' in TEST_UI_HTML
+    assert 'url("/fonts/roboto-vietnamese-wght-normal.woff2")' in TEST_UI_HTML
+    assert 'url("/fonts/roboto-latin-wght-normal.woff2")' in TEST_UI_HTML
     assert "--primary:#d71920" in TEST_UI_HTML
     assert "fonts.googleapis.com" not in TEST_UI_HTML
 
@@ -1270,6 +1272,20 @@ def test_production_orders_follow_selected_date() -> None:
     assert test_ui_module._matches_source_filters(
         items[0], work_date="2026-08-13", production_order="LSX-02"
     )
+
+
+def test_production_orders_read_master_table_rows() -> None:
+    rows = [
+        {"ma_lsx": "LSX-A", "ngay": "01/07/2026"},
+        {"so_lenh": "LSX-B", "work_date": "2026-07-01"},
+        {"ma_lsx": "LSX-C", "ngay": "2026-07-02"},
+    ]
+    assert test_ui_module._production_orders_from_master(rows, "2026-07-01") == [
+        "LSX-A",
+        "LSX-B",
+    ]
+    assert test_ui_module._normalize_source_date("01/07/2026") == "2026-07-01"
+    assert test_ui_module._production_order_code({"Lenh_SX": "  PO-9  "}) == "PO-9"
 
 
 def test_remote_product_image_does_not_request_redundant_signed_url() -> None:
@@ -1532,13 +1548,42 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "loadPanelRegions(session).then" in TEST_UI_HTML
 
 
+def test_ui_weighs_multiple_rounds_with_split_second_table() -> None:
+    assert 'id="roundCount"' in TEST_UI_HTML
+    assert 'id="addRoundBtn"' in TEST_UI_HTML
+    assert 'id="evidenceRounds"' in TEST_UI_HTML
+    assert 'id="weight2"' in TEST_UI_HTML
+    assert 'id="productWeight2"' in TEST_UI_HTML
+    assert "DEFAULT_WEIGH_ROUNDS=2" in TEST_UI_HTML
+    assert "MAX_WEIGH_ROUNDS=4" in TEST_UI_HTML
+    assert "function nextCaptureStep(" in TEST_UI_HTML
+    assert "function extraRoundTags(" in TEST_UI_HTML
+    assert "ROUND2_CORE=" in TEST_UI_HTML
+    assert "evidence-round split" in TEST_UI_HTML
+    assert "evidence-round split" in TEST_UI_HTML
+    assert "if(!isProduct&&session.coreAnalysis&&session.analysisId)" in TEST_UI_HTML
+    assert "if(targetRound===0)" in TEST_UI_HTML
+    assert "capture_kind:targetRound>0?'product':kind" in TEST_UI_HTML
+    assert "$('addRoundBtn').addEventListener('click'" in TEST_UI_HTML
+    assert 'id="captureQr2"' in TEST_UI_HTML
+    assert "Mã nhập SP lần 1" in TEST_UI_HTML
+    assert "Mã nhập SP lần 2" in TEST_UI_HTML
+    assert "ROUND2_QR=" in TEST_UI_HTML
+    assert "function codesReady(" in TEST_UI_HTML
+    assert "function attachRoundParams(" in TEST_UI_HTML
+    assert 'id="paramsPark"' in TEST_UI_HTML
+    assert "function selectCaptureSlot(" in TEST_UI_HTML
+    assert "function captureSlot(" in TEST_UI_HTML
+    assert "dataset.captureKind" in TEST_UI_HTML
+
+
 def test_ui_buttons_start_once_and_show_immediate_press_feedback() -> None:
     assert "function pulseButton(btn)" in TEST_UI_HTML
     assert "btn.dataset.busy==='1'" in TEST_UI_HTML
     assert "btn.setAttribute('aria-busy','true')" in TEST_UI_HTML
     assert "document.querySelectorAll('button:not([type])')" in TEST_UI_HTML
     assert "document.addEventListener('pointerdown'" in TEST_UI_HTML
-    assert "bindActionButton('cameraBtn'" in TEST_UI_HTML
+    assert "bindActionButton('openDefaultCamBtn'" in TEST_UI_HTML
     assert "bindActionButton('panelModeBtn'" in TEST_UI_HTML
     assert "function captureNextWeight()" in TEST_UI_HTML
     assert "if(!button.disabled)button.click()" in TEST_UI_HTML
@@ -1670,6 +1715,8 @@ def test_ui_does_not_offer_fake_gemini_profile_when_backend_is_local() -> None:
     assert "'/api/codex/login'" in TEST_UI_HTML
     assert "'/api/gemini/key'" in TEST_UI_HTML
     assert 'id="geminiKeyBtn"' in TEST_UI_HTML
+    assert 'id="settingsBtn"' in TEST_UI_HTML
+    assert 'id="settingsPanel"' in TEST_UI_HTML
     assert 'id="geminiApiKeyInput" type="password"' in TEST_UI_HTML
     assert 'id="geminiKeyStatus"' in TEST_UI_HTML
     assert "ĐỔI GEMINI KEY THÀNH CÔNG" in TEST_UI_HTML

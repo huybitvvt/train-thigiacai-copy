@@ -8,6 +8,7 @@ datas = [
     (str(project_root / "data" / "warehouse_scale_demo.png"), "assets/data"),
     (str(project_root / "data" / "viet_nhat_ipt_logo.jpg"), "assets/data"),
     (str(project_root / "frontend" / "index.html"), "assets/frontend"),
+    (str(project_root / "frontend" / "fonts"), "assets/frontend/fonts"),
 ]
 binaries = []
 hiddenimports = ["zxingcpp", "google.genai", "google.genai.types"]

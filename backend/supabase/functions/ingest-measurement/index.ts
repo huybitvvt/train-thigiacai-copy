@@ -192,6 +192,148 @@ Deno.serve(async (request: Request) => {
     });
   }
 
+  if (request.method === "GET" && action === "production-orders") {
+    const supabaseUrl = Deno.env.get("SUPABASE_URL");
+    const serviceKey = getSupabaseAdminKey();
+    if (!supabaseUrl || !serviceKey) {
+      return json(500, { ok: false, error: "supabase_not_configured" });
+    }
+    const workDate = (requestUrl.searchParams.get("work_date") ?? "").trim();
+    const supabase = createClient(supabaseUrl, serviceKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+    const configuredTable = (Deno.env.get("PRODUCTION_ORDER_TABLE") ?? "").trim();
+    const tables = [
+      configuredTable,
+      "lenh_san_xuat",
+      "Lenh_San_Xuat",
+      "Lệnh Sản xuất",
+      "Lệnh sản xuất",
+      "lenh_sx",
+      "production_orders",
+      "lsx",
+    ].filter((name, index, list) => name && list.indexOf(name) === index);
+    const orderKeys = [
+      "production_order",
+      "ma_lsx",
+      "so_lsx",
+      "so_lenh",
+      "lenh_sx",
+      "ma_lenh",
+      "ten_lsx",
+      "order_code",
+      "order_no",
+      "lsx",
+      "ma",
+      "code",
+    ];
+    const dateKeys = [
+      "work_date",
+      "ngay",
+      "ngay_lsx",
+      "ngay_san_xuat",
+      "ngay_sx",
+      "date",
+    ];
+    const normalizeDate = (value: unknown): string => {
+      const text = String(value ?? "").trim();
+      if (/^\d{4}-\d{2}-\d{2}/.test(text)) return text.slice(0, 10);
+      const match = text.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
+      if (!match) return "";
+      const first = Number(match[1]);
+      const second = Number(match[2]);
+      const year = Number(match[3]);
+      const day = first > 12 && second <= 12 ? second : first;
+      const month = first > 12 && second <= 12 ? first : second;
+      if (month > 12 || day > 31) return "";
+      return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    };
+    const orderCode = (row: Record<string, unknown>): string => {
+      const lowered = Object.fromEntries(
+        Object.entries(row).map(([key, value]) => [key.trim().toLowerCase(), value]),
+      );
+      for (const key of orderKeys) {
+        const text = String(lowered[key] ?? "").trim();
+        if (text) return text.slice(0, 80);
+      }
+      for (const [key, value] of Object.entries(lowered)) {
+        if (/(lsx|lenh|order)/i.test(key)) {
+          const text = String(value ?? "").trim();
+          if (text) return text.slice(0, 80);
+        }
+      }
+      return "";
+    };
+    const orderDate = (row: Record<string, unknown>): string => {
+      const lowered = Object.fromEntries(
+        Object.entries(row).map(([key, value]) => [key.trim().toLowerCase(), value]),
+      );
+      for (const key of dateKeys) {
+        const normalized = normalizeDate(lowered[key]);
+        if (normalized) return normalized;
+      }
+      return "";
+    };
+    const uniqueOrders = (rows: Record<string, unknown>[]): string[] => {
+      const all: string[] = [];
+      const matching: string[] = [];
+      let hasDates = false;
+      for (const row of rows) {
+        const code = orderCode(row);
+        if (!code) continue;
+        all.push(code);
+        const rowDate = orderDate(row);
+        if (rowDate) hasDates = true;
+        if (!workDate || !rowDate || rowDate === workDate) matching.push(code);
+      }
+      const chosen = !hasDates || matching.length ? matching : all;
+      return [...new Set(chosen.map((item) => item.trim()).filter(Boolean))].sort(
+        (left, right) => left.localeCompare(right, "vi"),
+      );
+    };
+
+    for (const table of tables) {
+      const { data, error } = await supabase.from(table).select("*").limit(1000);
+      if (error || !Array.isArray(data)) continue;
+      const orders = uniqueOrders(data as Record<string, unknown>[]);
+      if (orders.length) {
+        return json(200, {
+          ok: true,
+          source: table,
+          work_date: workDate,
+          orders,
+        });
+      }
+    }
+
+    const { data: measurements, error: measurementError } = await supabase
+      .from(MEASUREMENT_TABLE)
+      .select("captured_at,metadata")
+      .order("captured_at", { ascending: false })
+      .limit(200);
+    if (measurementError) {
+      return json(500, { ok: false, error: "production_order_list_failed" });
+    }
+    const measurementRows = (measurements ?? []).map((item) => {
+      const row = item as Record<string, unknown>;
+      const metadata = row.metadata !== null && typeof row.metadata === "object"
+        ? row.metadata as Record<string, unknown>
+        : {};
+      return {
+        captured_at: row.captured_at,
+        work_date: metadata.work_date,
+        production_order: metadata.production_order,
+        metadata,
+      };
+    });
+    return json(200, {
+      ok: true,
+      source: MEASUREMENT_TABLE,
+      work_date: workDate,
+      orders: uniqueOrders(measurementRows),
+    });
+  }
+
   if (request.method === "GET") {
     const supabaseUrl = Deno.env.get("SUPABASE_URL");
     const serviceKey = getSupabaseAdminKey();

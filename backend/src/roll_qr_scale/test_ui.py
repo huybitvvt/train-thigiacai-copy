@@ -35,7 +35,14 @@ from .codex_weight import DEFAULT_CODEX_TIMEOUT_SECONDS, CodexWeightReader
 from .codex_oauth import CodexOAuthClient, EncryptedCodexTokenStore
 from .codex_oauth_weight import CodexOAuthWeightReader
 from .capture_gate import frame_fingerprint
-from .api_client import fetch_supabase_table, persist_product_evidence, sign_storage_image
+from .api_client import (
+    fetch_remote_json,
+    fetch_remote_measurements,
+    fetch_supabase_rows,
+    fetch_supabase_table,
+    persist_product_evidence,
+    sign_storage_image,
+)
 from .inference_queue import InferenceCoordinator, InferenceQueueFull
 from .lookup_client import lookup_roll
 from .quality import FrameQuality, assess_frame_quality
@@ -69,6 +76,37 @@ UNITS = {"kg", "g", "lb"}
 WEIGHT_ENGINES = {"local", "hybrid", "gemini"}
 GEMINI_RECOGNITION_PROFILES = {"fast", "flash37", "accurate"}
 AI_RECOGNITION_PROVIDERS = {"gemini", "codex"}
+PRODUCTION_ORDER_TABLES = (
+    "lenh_san_xuat",
+    "Lenh_San_Xuat",
+    "Lệnh Sản xuất",
+    "Lệnh sản xuất",
+    "lenh_sx",
+    "production_orders",
+    "lsx",
+)
+PRODUCTION_ORDER_FIELDS = (
+    "production_order",
+    "ma_lsx",
+    "so_lsx",
+    "so_lenh",
+    "lenh_sx",
+    "ma_lenh",
+    "ten_lsx",
+    "order_code",
+    "order_no",
+    "lsx",
+    "ma",
+    "code",
+)
+PRODUCTION_ORDER_DATE_FIELDS = (
+    "work_date",
+    "ngay",
+    "ngay_lsx",
+    "ngay_san_xuat",
+    "ngay_sx",
+    "date",
+)
 
 
 def _supabase_project_url() -> str:
@@ -132,6 +170,71 @@ def _item_source_date(item: dict[str, object]) -> str:
     return _item_work_date(str(item.get("captured_at") or ""), raw)
 
 
+def _ingest_api_url() -> str:
+    return os.environ.get("ROLL_SCALE_API_URL", "").strip()
+
+
+def _ingest_api_token() -> str:
+    return (
+        os.environ.get("ROLL_SCALE_DEVICE_TOKEN", "").strip()
+        or os.environ.get("ROLL_SCALE_LOOKUP_TOKEN", "").strip()
+    )
+
+
+def _load_production_orders(work_date: str) -> tuple[list[str], str, str]:
+    fallback_error = ""
+    api_url = _ingest_api_url()
+    api_token = _ingest_api_token()
+    if api_url and api_token:
+        try:
+            remote = fetch_remote_json(
+                api_url,
+                api_token,
+                params={"action": "production-orders", "work_date": work_date},
+            )
+            if remote.get("ok") is True and isinstance(remote.get("orders"), list):
+                orders = [
+                    str(item).strip()
+                    for item in remote["orders"]
+                    if str(item).strip()
+                ]
+                if orders:
+                    return orders, str(remote.get("source") or "lenh_san_xuat"), ""
+            if remote.get("ok") is True and isinstance(remote.get("items"), list):
+                items = [item for item in remote["items"] if isinstance(item, dict)]
+                orders = _production_orders_from_master(items, work_date)
+                if orders:
+                    return orders, "can_tu_dong", ""
+        except Exception as exc:
+            fallback_error = str(exc)
+        try:
+            items = fetch_remote_measurements(api_url, api_token, limit=200)
+            orders = _production_orders_from_master(items, work_date)
+            if orders:
+                return orders, "can_tu_dong", fallback_error
+        except Exception as exc:
+            fallback_error = fallback_error or str(exc)
+    supabase_url = _supabase_project_url()
+    publishable_key = _supabase_read_key()
+    if supabase_url and publishable_key:
+        for table in _configured_production_order_tables():
+            try:
+                rows = fetch_supabase_rows(supabase_url, publishable_key, table)
+                orders = _production_orders_from_master(rows, work_date)
+                if orders:
+                    return orders, table, fallback_error
+            except Exception as exc:
+                fallback_error = fallback_error or str(exc)
+        try:
+            rows = fetch_supabase_table(supabase_url, publishable_key, limit=200)
+            orders = _production_orders_from_master(rows, work_date)
+            if orders:
+                return orders, "can_tu_dong", fallback_error
+        except Exception as exc:
+            fallback_error = fallback_error or str(exc)
+    return [], "local", fallback_error
+
+
 def _production_orders_for_date(
     items: list[dict[str, object]], work_date: str
 ) -> list[str]:
@@ -141,6 +244,94 @@ def _production_orders_for_date(
         if _item_source_date(item) == work_date
     }
     return sorted((order for order in orders if order), key=str.casefold)
+
+
+def _normalize_source_date(value: object) -> str:
+    text = str(value or "").strip()
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        return text[:10]
+    match = re.fullmatch(r"(\d{1,2})[/-](\d{1,2})[/-](\d{4})", text)
+    if not match:
+        return ""
+    first, second, year = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    day, month = (second, first) if first > 12 and second <= 12 else (first, second)
+    if month > 12 or day > 31:
+        return ""
+    return f"{year:04d}-{month:02d}-{day:02d}"
+
+
+def _row_field(
+    row: dict[str, object], names: tuple[str, ...], *, fuzzy: bool = False
+) -> str:
+    lowered = {str(key).strip().lower(): value for key, value in row.items()}
+    for name in names:
+        value = lowered.get(name)
+        text = str(value or "").strip()
+        if text:
+            return text[:80]
+    if fuzzy:
+        for key, value in lowered.items():
+            if any(token in key for token in ("lsx", "lenh", "order")):
+                text = str(value or "").strip()
+                if text:
+                    return text[:80]
+    return ""
+
+
+def _production_order_code(row: dict[str, object]) -> str:
+    direct = _item_source_value(row, "production_order", "SOURCE_PRODUCTION_ORDER")
+    if direct:
+        return direct[:80]
+    return _row_field(row, PRODUCTION_ORDER_FIELDS, fuzzy=True)
+
+
+def _production_order_date(row: dict[str, object]) -> str:
+    selected = _item_source_date(row)
+    if selected:
+        return selected
+    return _normalize_source_date(_row_field(row, PRODUCTION_ORDER_DATE_FIELDS))
+
+
+def _production_orders_from_master(
+    rows: list[dict[str, object]], work_date: str = ""
+) -> list[str]:
+    all_orders: list[str] = []
+    matching: list[str] = []
+    has_dates = False
+    for row in rows:
+        code = _production_order_code(row)
+        if not code:
+            continue
+        all_orders.append(code)
+        row_date = _production_order_date(row)
+        if row_date:
+            has_dates = True
+        if not work_date or not row_date or row_date == work_date:
+            matching.append(code)
+    chosen = matching if (not has_dates or matching) else all_orders
+    unique: list[str] = []
+    seen: set[str] = set()
+    for order in chosen:
+        key = order.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(order)
+    return sorted(unique, key=str.casefold)
+
+
+def _configured_production_order_tables() -> list[str]:
+    configured = os.environ.get("ROLL_SCALE_PRODUCTION_ORDER_TABLE", "").strip()
+    tables = [configured] if configured else []
+    tables.extend(PRODUCTION_ORDER_TABLES)
+    unique: list[str] = []
+    seen: set[str] = set()
+    for table in tables:
+        if not table or table in seen:
+            continue
+        seen.add(table)
+        unique.append(table)
+    return unique
 
 
 def _matches_source_filters(
@@ -1764,6 +1955,13 @@ def _frontend_index_path() -> Path:
     return Path(__file__).resolve().parents[3] / "frontend" / "index.html"
 
 
+def _frontend_font_path(filename: str) -> Path | None:
+    if not re.fullmatch(r"roboto-[a-z0-9-]+\.woff2", filename):
+        return None
+    path = _frontend_index_path().parent / "fonts" / filename
+    return path if path.is_file() else None
+
+
 def load_frontend_html() -> str:
     index_path = _frontend_index_path()
     try:
@@ -2161,10 +2359,17 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     },
                 )
                 return
+            if parsed.path.startswith("/fonts/"):
+                font_path = _frontend_font_path(Path(parsed.path).name)
+                if font_path is None:
+                    self.send_json(404, {"ok": False, "error": "font_missing"})
+                    return
+                self.send_bytes(200, "font/woff2", font_path.read_bytes())
+                return
             if not self.require_authorization():
                 return
             if parsed.path == "/":
-                self.send_bytes(200, "text/html; charset=utf-8", TEST_UI_HTML.encode("utf-8"))
+                self.send_bytes(200, "text/html; charset=utf-8", load_frontend_html().encode("utf-8"))
                 return
             if parsed.path == "/demo.jpg":
                 if not demo_path.is_file():
@@ -2246,30 +2451,17 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     }
                     for item in store.recent(200)
                 ]
-                source = "local"
-                fallback_error = ""
-                supabase_url = _supabase_project_url()
-                publishable_key = _supabase_read_key()
-                if supabase_url and publishable_key:
-                    try:
-                        rows = [
-                            *fetch_supabase_table(
-                                supabase_url,
-                                publishable_key,
-                                limit=200,
-                            ),
-                            *rows,
-                        ]
-                        source = "can_tu_dong"
-                    except Exception as exc:
-                        fallback_error = str(exc)
+                orders, source, fallback_error = _load_production_orders(work_date)
+                if not orders:
+                    orders = _production_orders_from_master(rows, work_date)
+                    source = "local"
                 self.send_json(
                     200,
                     {
                         "ok": True,
                         "source": source,
                         "work_date": work_date,
-                        "orders": _production_orders_for_date(rows, work_date),
+                        "orders": orders,
                         "fallback_error": fallback_error or None,
                     },
                 )
