@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import pytest
 import qrcode
 
 from roll_qr_scale.qr_reader import QRReader
@@ -40,6 +41,30 @@ def test_decodes_small_low_contrast_qr_after_grayscale_preprocessing() -> None:
 
     assert [item.value for item in detections] == [value]
     assert detections[0].decoder.startswith("zxing")
+
+
+def test_localizes_and_zooms_tiny_qr_in_full_scale_frame() -> None:
+    value = "SP-ZOOM-2026-001"
+    qr_image = np.asarray(qrcode.make(value).convert("RGB"))
+    qr_bgr = cv2.resize(
+        cv2.cvtColor(qr_image, cv2.COLOR_RGB2BGR),
+        (34, 34),
+        interpolation=cv2.INTER_AREA,
+    )
+    frame = np.full((900, 1600, 3), 205, dtype=np.uint8)
+    frame[420:454, 930:964] = qr_bgr
+
+    reader = QRReader()
+    assert reader._decode_image(frame) == []
+
+    detections = reader.decode(frame)
+
+    assert [item.value for item in detections] == [value]
+    assert detections[0].decoder.startswith("finder-roi+")
+    assert "@" in detections[0].decoder
+    center = detections[0].points.mean(axis=0)
+    assert center[0] == pytest.approx(947, abs=8)
+    assert center[1] == pytest.approx(437, abs=8)
 
 
 def test_decoder_first_success_does_not_call_yolo_fallback() -> None:
