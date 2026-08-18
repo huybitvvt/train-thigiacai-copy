@@ -186,7 +186,7 @@ Mở `http://127.0.0.1:8080` rồi vận hành như sau:
 1. Cho phép quyền camera, bấm `Làm mới camera`, sau đó chọn đúng camera vật lý trong dropdown của từng trạm. Không dựa vào thứ tự camera `0/1/2` của hệ điều hành.
 2. Ánh xạ browser `deviceId` được lưu trong `localStorage` theo `gateway_id`. Một camera vật lý không thể gán cho hai trạm. Nếu đổi browser/profile/cổng USB làm `deviceId` đổi, chọn lại camera.
 3. Bấm `Mở camera đã gán`. Khi camera rớt kết nối, card chuyển sang `MẤT KẾT NỐI`; giao diện chỉ thử lại đúng `deviceId` đã gán và từ chối stream nếu browser trả nhầm camera. Sự kiện cắm/rút USB cũng kích hoạt làm mới và reconnect.
-4. Chọn trạm bằng card hoặc phím `1`, `2`, `3`. `Space` luôn chụp bước còn thiếu kế tiếp: cân lõi trước, rồi cân sản phẩm. Số cân và ảnh đã chụp được giữ nguyên; QR được nhận diện độc lập từ ảnh hoặc có thể nhập/quét thủ công.
+4. Chọn trạm bằng card hoặc phím `1`, `2`, `3`. `Space` luôn chụp bước còn thiếu kế tiếp theo thứ tự: lõi lần 1 → sản phẩm lần 1 → lõi lần 2 → sản phẩm lần 2. Khi AI đọc xong một bước, ảnh vẫn nằm trong ô bằng chứng nhưng khung lớn tự trở về camera live và chọn sẵn bước tiếp theo. Sau khi lưu xong phiên, thứ tự được đặt lại về lõi lần 1. QR được nhận diện độc lập từ ảnh hoặc có thể nhập/quét thủ công.
 5. Kiểm tra hai số cân, hai preview bằng chứng và mã SP tự đọc. `Enter` chỉ lưu khi đủ hai số cân + hai ảnh + mã SP trong cùng event. Dùng `Bỏ lần đang xem` nếu thật sự muốn hủy cả phiên.
 6. Sau khi SQLite commit thành công, tùy chọn auto-advance chọn trạm kế tiếp theo vòng tròn. Checkbox trên giao diện có thể đổi hành vi trong phiên hiện tại.
 

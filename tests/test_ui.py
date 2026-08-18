@@ -1692,7 +1692,11 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "event.key==='P'" not in TEST_UI_HTML
     assert "recognitionProvider.value==='codex'?'Codex':'AI'" in TEST_UI_HTML
     assert "function showPostCaptureSource(session)" in TEST_UI_HTML
-    assert "showPostCaptureSource(session);" in TEST_UI_HTML
+    assert "session.preview.onload=null;if(session.stream){showVideo(session);return}" in TEST_UI_HTML
+    assert "function advanceToNextCapture(session)" in TEST_UI_HTML
+    assert "const next=nextCaptureStep(session);if(next)session.selectedSlot=next" in TEST_UI_HTML
+    assert "advanceToNextCapture(session);" in TEST_UI_HTML
+    assert "session.selectedSlot={kind:'core',round:0};ensureRounds(session)" in TEST_UI_HTML
     assert "showCapturedBlank" not in TEST_UI_HTML
     assert "function cameraVideoConstraints()" in TEST_UI_HTML
     assert "function tuneCameraTrack(track)" in TEST_UI_HTML
