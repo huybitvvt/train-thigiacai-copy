@@ -1734,6 +1734,14 @@ def test_ui_weighs_multiple_rounds_with_split_second_table() -> None:
     assert "MAX_WEIGH_ROUNDS=4" in TEST_UI_HTML
     assert "function nextCaptureStep(" in TEST_UI_HTML
     assert "function extraRoundTags(" in TEST_UI_HTML
+    assert "function discardSlot(" in TEST_UI_HTML
+    assert "function discardRound(" in TEST_UI_HTML
+    assert "function resetWeighRound(" in TEST_UI_HTML
+    assert "className='slot-discard'" in TEST_UI_HTML
+    assert "Bỏ từng ô để đọc lại" in TEST_UI_HTML
+    assert "dataset.discardKind=kind" in TEST_UI_HTML
+    assert "dataset.discardRound=String(round)" in TEST_UI_HTML
+    assert "Ô còn lại giữ nguyên" in TEST_UI_HTML
     assert "ROUND2_CORE=" in TEST_UI_HTML
     assert "evidence-round split" in TEST_UI_HTML
     assert "evidence-round split" in TEST_UI_HTML
@@ -1746,6 +1754,11 @@ def test_ui_weighs_multiple_rounds_with_split_second_table() -> None:
     assert "Mã nhập SP lần 2" in TEST_UI_HTML
     assert "ROUND2_QR=" in TEST_UI_HTML
     assert "function codesReady(" in TEST_UI_HTML
+    assert "function applyScannedQr(" in TEST_UI_HTML
+    assert "function targetQrInput(" in TEST_UI_HTML
+    assert "function flushQrScanBuffer(" in TEST_UI_HTML
+    assert "Đã nhận QR " in TEST_UI_HTML
+    assert "persistEditor(session);refreshCompletionState(session)}" in TEST_UI_HTML
     assert "function attachRoundParams(" in TEST_UI_HTML
     assert 'id="paramsPark"' in TEST_UI_HTML
     assert "function selectCaptureSlot(" in TEST_UI_HTML
@@ -1852,7 +1865,7 @@ def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
         "Cân bằng · 3.7 Flash · Low · Free",
         "Chính xác · Pro · cần trả phí",
         "savedStationIndex=stations.indexOf(session)",
-        "captureEditor=event.target===captureQr||event.target===$('biWeight')",
+        "captureEditor=isQrField(event.target)||event.target===$('biWeight')",
         "scheduleReconnect(session,session.deviceId)",
         "this.hydratedPending=Boolean(config.event_id)",
         "function pollPendingSessions()",
@@ -1861,10 +1874,12 @@ def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
         "weight_frames:weightFrames",
         "captureWeightBurst(session)",
         "function isTextEditingTarget(target)",
-        "event.key==='Backspace'&&current()?.hasUnsavedReview()",
+        "function discardSlot(",
+        "function discardRound(",
         "discardCurrent(requireConfirmation=false)",
         "session._discardLock=true;renderControls()",
         "discardCurrent(false)",
+        "className='slot-discard'",
     ):
         assert marker in TEST_UI_HTML
 
