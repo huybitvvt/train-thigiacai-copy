@@ -206,6 +206,21 @@ thực tế, rồi thực hiện một lần:
    một request Gemini; kết quả trả về theo đúng tên từng chỉ số. Vùng không chắc chắn
    hiển thị `--`, không tự đoán.
 
+Có thể dành riêng camera Wi-Fi EZVIZ C6N cho bảng chỉ số mà không thay camera cân:
+
+1. Đặt camera EZVIZ và PC vận hành trong cùng mạng LAN, xác định IP cố định/DHCP
+   reservation cho camera.
+2. Trong SplitCam hoặc OBS, thêm nguồn RTSP theo mẫu
+   `rtsp://admin:[MÃ XÁC THỰC]@[IP CAMERA]:554/ch1/main`, rồi bật camera ảo.
+3. Trên giao diện, mở `Bảng nhiều chỉ số`, chọn camera SplitCam/OBS tại
+   `Camera bảng riêng`, rồi bấm `Mở camera bảng`. Ánh xạ `deviceId` camera ảo được
+   lưu cục bộ theo trạm; khi đóng chế độ bảng, luồng camera ảo dừng và giao diện trở
+   về camera cân.
+
+Không nhập URL RTSP hoặc mã xác thực vào Render, Git hay nội dung chat. Render không
+thể kết nối trực tiếp IP riêng trong LAN; SplitCam/OBS trên PC là cầu nối RTSP thành
+camera trình duyệt và thông tin đăng nhập chỉ nằm tại PC vận hành.
+
 Camera phải giữ nguyên vị trí sau khi gán. Nếu camera bị xoay, zoom, đổi độ phân giải
 hoặc bảng bị dịch chuyển, xóa và gán lại vùng. Mỗi ảnh gửi Gemini gồm crop gốc và bản
 lọc LED đỏ/xanh để giảm nhầm các đoạn số xám chưa sáng.

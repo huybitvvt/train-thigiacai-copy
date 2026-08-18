@@ -1722,6 +1722,15 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "function scanPanelRegions(" in TEST_UI_HTML
     assert "Tự tìm sẽ khoanh từng hàng số LED đang sáng" in TEST_UI_HTML
     assert "loadPanelRegions(session).then" in TEST_UI_HTML
+    assert 'id="panelCameraSelect"' in TEST_UI_HTML
+    assert 'id="openPanelCameraBtn"' in TEST_UI_HTML
+    assert 'id="closePanelCameraBtn"' in TEST_UI_HTML
+    assert "PANEL_CAMERA_MAP_PREFIX" in TEST_UI_HTML
+    assert "function openPanelCamera(" in TEST_UI_HTML
+    assert "function useMainCameraForPanel(" in TEST_UI_HTML
+    assert "function captureSource(" in TEST_UI_HTML
+    assert "session.panelStream&&session.panelVideo.videoWidth" in TEST_UI_HTML
+    assert "URL và mã xác thực không được gửi lên Render" in TEST_UI_HTML
 
 
 def test_ui_weighs_multiple_rounds_with_split_second_table() -> None:
