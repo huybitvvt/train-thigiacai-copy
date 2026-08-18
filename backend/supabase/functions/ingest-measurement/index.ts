@@ -199,6 +199,8 @@ Deno.serve(async (request: Request) => {
       return json(500, { ok: false, error: "supabase_not_configured" });
     }
     const workDate = (requestUrl.searchParams.get("work_date") ?? "").trim();
+    const shift = (requestUrl.searchParams.get("shift") ?? "").trim();
+    const machine = (requestUrl.searchParams.get("machine") ?? "").trim();
     const supabase = createClient(supabaseUrl, serviceKey, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
@@ -234,6 +236,18 @@ Deno.serve(async (request: Request) => {
       "ngay_san_xuat",
       "ngay_sx",
       "date",
+      "bat_dau",
+      "ngay_bat_dau",
+    ];
+    const shiftKeys = ["shift", "ca", "ca_lam_viec", "ca_sx", "shift_code"];
+    const machineKeys = [
+      "machine",
+      "may",
+      "máy",
+      "ten_may",
+      "ma_may",
+      "loai_may",
+      "machine_name",
     ];
     const normalizeDate = (value: unknown): string => {
       const text = String(value ?? "").trim();
@@ -243,8 +257,18 @@ Deno.serve(async (request: Request) => {
       const first = Number(match[1]);
       const second = Number(match[2]);
       const year = Number(match[3]);
-      const day = first > 12 && second <= 12 ? second : first;
-      const month = first > 12 && second <= 12 ? first : second;
+      let day: number;
+      let month: number;
+      if (first > 12 && second <= 12) {
+        day = first;
+        month = second;
+      } else if (second > 12 && first <= 12) {
+        day = second;
+        month = first;
+      } else {
+        day = first;
+        month = second;
+      }
       if (month > 12 || day > 31) return "";
       return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
     };
@@ -264,7 +288,51 @@ Deno.serve(async (request: Request) => {
       }
       return "";
     };
+    const rowField = (
+      row: Record<string, unknown>,
+      names: string[],
+      fuzzyTokens: string[] = [],
+    ): string => {
+      const lowered = Object.fromEntries(
+        Object.entries(row).map(([key, value]) => [key.trim().toLowerCase(), value]),
+      );
+      for (const name of names) {
+        const text = String(lowered[name] ?? "").trim();
+        if (text) return text.slice(0, 80);
+      }
+      for (const [key, value] of Object.entries(lowered)) {
+        if (fuzzyTokens.some((token) => key.includes(token))) {
+          const text = String(value ?? "").trim();
+          if (text) return text.slice(0, 80);
+        }
+      }
+      return "";
+    };
+    const rawTag = (raw: string, name: string): string => {
+      const match = raw.match(new RegExp(`(?:^|; )\\s*${name}=([^;]+)`));
+      return match ? match[1].trim() : "";
+    };
+    const sourceValue = (
+      row: Record<string, unknown>,
+      field: string,
+      tag: string,
+    ): string => {
+      const direct = String(row[field] ?? "").trim();
+      if (direct) return direct;
+      const metadata = row.metadata;
+      if (metadata && typeof metadata === "object") {
+        const meta = metadata as Record<string, unknown>;
+        const metaValue = String(meta[field] ?? "").trim();
+        if (metaValue) return metaValue;
+        const raw = String(meta.weight_raw ?? row.weight_raw ?? "");
+        const tagged = rawTag(raw, tag);
+        if (tagged) return tagged;
+      }
+      return rawTag(String(row.weight_raw ?? ""), tag);
+    };
     const orderDate = (row: Record<string, unknown>): string => {
+      const tagged = sourceValue(row, "work_date", "SOURCE_DATE");
+      if (tagged) return normalizeDate(tagged);
       const lowered = Object.fromEntries(
         Object.entries(row).map(([key, value]) => [key.trim().toLowerCase(), value]),
       );
@@ -272,22 +340,37 @@ Deno.serve(async (request: Request) => {
         const normalized = normalizeDate(lowered[key]);
         if (normalized) return normalized;
       }
+      const capturedAt = String(row.captured_at ?? "");
+      if (/^\d{4}-\d{2}-\d{2}/.test(capturedAt)) return capturedAt.slice(0, 10);
       return "";
     };
+    const orderShift = (row: Record<string, unknown>): string =>
+      sourceValue(row, "shift", "SOURCE_SHIFT") || rowField(row, shiftKeys);
+    const orderMachine = (row: Record<string, unknown>): string =>
+      sourceValue(row, "machine", "SOURCE_MACHINE") || rowField(row, machineKeys);
+    const rowMatchesFilters = (row: Record<string, unknown>): boolean => {
+      if (workDate) {
+        const rowDate = orderDate(row);
+        if (rowDate && rowDate !== workDate) return false;
+      }
+      if (shift) {
+        const rowShift = orderShift(row);
+        if (rowShift && rowShift !== shift) return false;
+      }
+      if (machine) {
+        const rowMachine = orderMachine(row);
+        if (rowMachine && rowMachine !== machine) return false;
+      }
+      return true;
+    };
     const uniqueOrders = (rows: Record<string, unknown>[]): string[] => {
-      const all: string[] = [];
       const matching: string[] = [];
-      let hasDates = false;
       for (const row of rows) {
         const code = orderCode(row);
-        if (!code) continue;
-        all.push(code);
-        const rowDate = orderDate(row);
-        if (rowDate) hasDates = true;
-        if (!workDate || !rowDate || rowDate === workDate) matching.push(code);
+        if (!code || !rowMatchesFilters(row)) continue;
+        matching.push(code);
       }
-      const chosen = !hasDates || matching.length ? matching : all;
-      return [...new Set(chosen.map((item) => item.trim()).filter(Boolean))].sort(
+      return [...new Set(matching.map((item) => item.trim()).filter(Boolean))].sort(
         (left, right) => left.localeCompare(right, "vi"),
       );
     };
@@ -301,6 +384,8 @@ Deno.serve(async (request: Request) => {
           ok: true,
           source: table,
           work_date: workDate,
+          shift: shift || null,
+          machine: machine || null,
           orders,
         });
       }
@@ -322,7 +407,10 @@ Deno.serve(async (request: Request) => {
       return {
         captured_at: row.captured_at,
         work_date: metadata.work_date,
+        shift: metadata.shift,
+        machine: metadata.machine,
         production_order: metadata.production_order,
+        weight_raw: metadata.weight_raw,
         metadata,
       };
     });
@@ -330,6 +418,8 @@ Deno.serve(async (request: Request) => {
       ok: true,
       source: MEASUREMENT_TABLE,
       work_date: workDate,
+      shift: shift || null,
+      machine: machine || null,
       orders: uniqueOrders(measurementRows),
     });
   }

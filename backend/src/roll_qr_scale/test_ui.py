@@ -12,6 +12,7 @@ import inspect
 import sys
 import threading
 import time
+import unicodedata
 import urllib.parse
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -88,6 +89,8 @@ PRODUCTION_ORDER_TABLES = (
 PRODUCTION_ORDER_FIELDS = (
     "production_order",
     "ma_lsx",
+    "mã lệnh",
+    "ma lenh",
     "so_lsx",
     "so_lenh",
     "lenh_sx",
@@ -106,7 +109,60 @@ PRODUCTION_ORDER_DATE_FIELDS = (
     "ngay_san_xuat",
     "ngay_sx",
     "date",
+    "bat_dau",
+    "ngay_bat_dau",
+    "bắt đầu",
+    "bat dau",
 )
+PRODUCTION_ORDER_SHIFT_FIELDS = (
+    "shift",
+    "ca",
+    "ca_lam_viec",
+    "ca_sx",
+    "shift_code",
+)
+PRODUCTION_ORDER_PRODUCT_FIELDS = (
+    "ten_hang",
+    "tên hàng",
+    "ten_hang_sp",
+    "ma_hang",
+    "mã hàng",
+    "product_name",
+    "ten_sp",
+)
+MACHINE_PRODUCT_HINTS: dict[str, tuple[str, ...]] = {
+    "Máy cách nhiệt": ("cach nhiet", "ranko", "tam cach"),
+    "Máy Bao Bì": ("bao bi", "bao goi", "dong goi"),
+    "Máy tái chế": ("tai che", "tai che"),
+}
+PRODUCTION_ORDER_MACHINE_FIELDS = (
+    "machine",
+    "may",
+    "máy",
+    "ten_may",
+    "ma_may",
+    "loai_may",
+    "machine_name",
+)
+
+
+def _production_order_product_text(row: dict[str, object]) -> str:
+    return _row_field(row, PRODUCTION_ORDER_PRODUCT_FIELDS)
+
+
+def _machine_matches_row(row: dict[str, object], machine: str) -> bool:
+    if not machine:
+        return True
+    row_machine = _production_order_machine(row)
+    if row_machine:
+        return row_machine == machine
+    product = _normalize_field_key(_production_order_product_text(row))
+    if not product:
+        return True
+    hints = MACHINE_PRODUCT_HINTS.get(machine, ())
+    if not hints:
+        return True
+    return any(hint in product for hint in hints)
 
 
 def _supabase_project_url() -> str:
@@ -117,6 +173,19 @@ def _supabase_project_url() -> str:
     marker = "/functions/v1/"
     if marker in api_url:
         return api_url.split(marker, 1)[0].rstrip("/")
+    for candidate in (
+        Path(__file__).resolve().parents[3] / "supabase" / ".temp" / "linked-project.json",
+        Path(__file__).resolve().parents[3] / "backend" / "supabase" / ".temp" / "linked-project.json",
+    ):
+        if not candidate.is_file():
+            continue
+        try:
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        project_ref = str(payload.get("ref") or "").strip()
+        if project_ref:
+            return f"https://{project_ref}.supabase.co"
     return ""
 
 
@@ -125,6 +194,49 @@ def _supabase_read_key() -> str:
         os.environ.get("ROLL_SCALE_SUPABASE_SERVICE_KEY", "").strip()
         or os.environ.get("ROLL_SCALE_SUPABASE_PUBLISHABLE_KEY", "").strip()
     )
+
+
+def _production_order_supabase_url() -> str:
+    return (
+        os.environ.get("ROLL_SCALE_PRODUCTION_ORDER_SUPABASE_URL", "").strip().rstrip("/")
+        or os.environ.get("NEXT_PUBLIC_SUPABASE_URL", "").strip().rstrip("/")
+    )
+
+
+def _production_order_supabase_key() -> str:
+    return (
+        os.environ.get("ROLL_SCALE_PRODUCTION_ORDER_SUPABASE_SERVICE_KEY", "").strip()
+        or os.environ.get("ROLL_SCALE_PRODUCTION_ORDER_SUPABASE_KEY", "").strip()
+        or os.environ.get("ROLL_SCALE_PRODUCTION_ORDER_SUPABASE_PUBLISHABLE_KEY", "").strip()
+        or os.environ.get("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY", "").strip()
+    )
+
+
+def _production_orders_from_supabase_tables(
+    supabase_url: str,
+    supabase_key: str,
+    work_date: str,
+    *,
+    shift: str = "",
+    machine: str = "",
+    source_prefix: str = "master",
+) -> tuple[list[str], str, str]:
+    fallback_error = ""
+    for table in _configured_production_order_tables():
+        try:
+            rows = fetch_supabase_rows(supabase_url, supabase_key, table)
+            orders = _production_orders_from_master(
+                rows, work_date, shift=shift, machine=machine
+            )
+            if orders:
+                return orders, f"{source_prefix}:{table}", fallback_error
+        except Exception as exc:
+            fallback_error = fallback_error or str(exc)
+    return [], source_prefix, fallback_error
+
+
+def _master_production_orders_configured() -> bool:
+    return bool(_production_order_supabase_url() and _production_order_supabase_key())
 
 
 def _raw_tag(raw: str, name: str) -> str:
@@ -170,6 +282,35 @@ def _item_source_date(item: dict[str, object]) -> str:
     return _item_work_date(str(item.get("captured_at") or ""), raw)
 
 
+def _project_root() -> Path:
+    candidate = Path(__file__).resolve().parents[3]
+    if (candidate / ".env").is_file() or (candidate / "frontend" / "index.html").is_file():
+        return candidate
+    cwd = Path.cwd()
+    if (cwd / ".env").is_file() or (cwd / "frontend" / "index.html").is_file():
+        return cwd
+    return candidate
+
+
+def _load_local_dotenv() -> None:
+    env_path = _project_root() / ".env"
+    if not env_path.is_file():
+        return
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and (key not in os.environ or not str(os.environ.get(key, "")).strip()):
+            os.environ[key] = value
+
+
 def _ingest_api_url() -> str:
     return os.environ.get("ROLL_SCALE_API_URL", "").strip()
 
@@ -181,16 +322,57 @@ def _ingest_api_token() -> str:
     )
 
 
-def _load_production_orders(work_date: str) -> tuple[list[str], str, str]:
+def _looks_like_measurement_items(items: list[dict[str, object]]) -> bool:
+    if not items:
+        return False
+    sample = items[: min(3, len(items))]
+    return all(
+        "weight" in item or "qr_code" in item or "event_id" in item for item in sample
+    )
+
+
+def _load_production_orders_once(
+    work_date: str,
+    shift: str = "",
+    machine: str = "",
+) -> tuple[list[str], str, str]:
+    _load_local_dotenv()
     fallback_error = ""
+    master_url = _production_order_supabase_url()
+    master_key = _production_order_supabase_key()
+    if master_url and master_key:
+        orders, source, master_error = _production_orders_from_supabase_tables(
+            master_url,
+            master_key,
+            work_date,
+            shift=shift,
+            machine=machine,
+            source_prefix="master",
+        )
+        if orders:
+            return orders, source, ""
+        fallback_error = master_error
+        return [], source, fallback_error or (
+            f"Không có LSX cho ngày {work_date}, ca {shift}, máy {machine}"
+            if machine
+            else f"Không có LSX cho ngày {work_date}, ca {shift}"
+        )
     api_url = _ingest_api_url()
     api_token = _ingest_api_token()
+    query_params: dict[str, object] = {
+        "action": "production-orders",
+        "work_date": work_date,
+    }
+    if shift:
+        query_params["shift"] = shift
+    if machine:
+        query_params["machine"] = machine
     if api_url and api_token:
         try:
             remote = fetch_remote_json(
                 api_url,
                 api_token,
-                params={"action": "production-orders", "work_date": work_date},
+                params=query_params,
             )
             if remote.get("ok") is True and isinstance(remote.get("orders"), list):
                 orders = [
@@ -202,37 +384,65 @@ def _load_production_orders(work_date: str) -> tuple[list[str], str, str]:
                     return orders, str(remote.get("source") or "lenh_san_xuat"), ""
             if remote.get("ok") is True and isinstance(remote.get("items"), list):
                 items = [item for item in remote["items"] if isinstance(item, dict)]
-                orders = _production_orders_from_master(items, work_date)
-                if orders:
-                    return orders, "can_tu_dong", ""
+                if _looks_like_measurement_items(items):
+                    fallback_error = (
+                        "Cloud chưa trả bảng lệnh SX; cần deploy ingest-measurement "
+                        "hoặc thêm ROLL_SCALE_SUPABASE_SERVICE_KEY vào .env"
+                    )
+                else:
+                    orders = _production_orders_from_master(
+                        items, work_date, shift=shift, machine=machine
+                    )
+                    if orders:
+                        return orders, str(remote.get("source") or "lenh_san_xuat"), ""
         except Exception as exc:
             fallback_error = str(exc)
-        try:
-            items = fetch_remote_measurements(api_url, api_token, limit=200)
-            orders = _production_orders_from_master(items, work_date)
-            if orders:
-                return orders, "can_tu_dong", fallback_error
-        except Exception as exc:
-            fallback_error = fallback_error or str(exc)
     supabase_url = _supabase_project_url()
     publishable_key = _supabase_read_key()
-    if supabase_url and publishable_key:
-        for table in _configured_production_order_tables():
-            try:
-                rows = fetch_supabase_rows(supabase_url, publishable_key, table)
-                orders = _production_orders_from_master(rows, work_date)
-                if orders:
-                    return orders, table, fallback_error
-            except Exception as exc:
-                fallback_error = fallback_error or str(exc)
-        try:
-            rows = fetch_supabase_table(supabase_url, publishable_key, limit=200)
-            orders = _production_orders_from_master(rows, work_date)
-            if orders:
-                return orders, "can_tu_dong", fallback_error
-        except Exception as exc:
-            fallback_error = fallback_error or str(exc)
+    if supabase_url and publishable_key and (
+        not master_url or supabase_url.rstrip("/") != master_url.rstrip("/")
+    ):
+        orders, source, table_error = _production_orders_from_supabase_tables(
+            supabase_url,
+            publishable_key,
+            work_date,
+            shift=shift,
+            machine=machine,
+            source_prefix="ingest",
+        )
+        if orders:
+            return orders, source, fallback_error or table_error
+        fallback_error = fallback_error or table_error
+    elif supabase_url and not publishable_key and not master_key:
+        fallback_error = fallback_error or (
+            "Thiếu ROLL_SCALE_PRODUCTION_ORDER_SUPABASE_SERVICE_KEY hoặc "
+            "ROLL_SCALE_SUPABASE_PUBLISHABLE_KEY trong .env"
+        )
     return [], "local", fallback_error
+
+
+def _load_production_orders(
+    work_date: str,
+    shift: str = "",
+    machine: str = "",
+) -> tuple[list[str], str, str, str | None]:
+    _load_local_dotenv()
+    if _master_production_orders_configured():
+        orders, source, fallback_error = _load_production_orders_once(
+            work_date, shift=shift, machine=machine
+        )
+        return orders, source, fallback_error, None
+    orders, source, fallback_error = _load_production_orders_once(
+        work_date, shift=shift, machine=machine
+    )
+    if orders or not machine:
+        return orders, source, fallback_error, None
+    relaxed_orders, relaxed_source, relaxed_error = _load_production_orders_once(
+        work_date, shift=shift, machine=""
+    )
+    if relaxed_orders:
+        return relaxed_orders, relaxed_source, relaxed_error or fallback_error, "machine"
+    return orders, source, fallback_error or relaxed_error, None
 
 
 def _production_orders_for_date(
@@ -254,24 +464,40 @@ def _normalize_source_date(value: object) -> str:
     if not match:
         return ""
     first, second, year = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
-    day, month = (second, first) if first > 12 and second <= 12 else (first, second)
+    if first > 12 and second <= 12:
+        day, month = first, second
+    elif second > 12 and first <= 12:
+        day, month = second, first
+    else:
+        day, month = first, second
     if month > 12 or day > 31:
         return ""
     return f"{year:04d}-{month:02d}-{day:02d}"
 
 
+def _normalize_field_key(key: object) -> str:
+    text = unicodedata.normalize("NFD", str(key or "").strip().lower())
+    return "".join(char for char in text if unicodedata.category(char) != "Mn")
+
+
 def _row_field(
-    row: dict[str, object], names: tuple[str, ...], *, fuzzy: bool = False
+    row: dict[str, object],
+    names: tuple[str, ...],
+    *,
+    fuzzy: bool = False,
+    fuzzy_tokens: tuple[str, ...] = ("lsx", "lenh", "order"),
 ) -> str:
-    lowered = {str(key).strip().lower(): value for key, value in row.items()}
+    lowered = {
+        _normalize_field_key(key): value for key, value in row.items()
+    }
     for name in names:
-        value = lowered.get(name)
+        value = lowered.get(_normalize_field_key(name))
         text = str(value or "").strip()
         if text:
             return text[:80]
     if fuzzy:
         for key, value in lowered.items():
-            if any(token in key for token in ("lsx", "lenh", "order")):
+            if any(token in key for token in fuzzy_tokens):
                 text = str(value or "").strip()
                 if text:
                     return text[:80]
@@ -292,31 +518,63 @@ def _production_order_date(row: dict[str, object]) -> str:
     return _normalize_source_date(_row_field(row, PRODUCTION_ORDER_DATE_FIELDS))
 
 
+def _production_order_shift(row: dict[str, object]) -> str:
+    direct = _item_source_value(row, "shift", "SOURCE_SHIFT")
+    if direct:
+        return direct
+    return _row_field(row, PRODUCTION_ORDER_SHIFT_FIELDS)
+
+
+def _production_order_machine(row: dict[str, object]) -> str:
+    direct = _item_source_value(row, "machine", "SOURCE_MACHINE")
+    if direct:
+        return direct
+    return _row_field(row, PRODUCTION_ORDER_MACHINE_FIELDS)
+
+
+def _row_matches_production_filters(
+    row: dict[str, object],
+    *,
+    work_date: str = "",
+    shift: str = "",
+    machine: str = "",
+) -> bool:
+    if work_date:
+        row_date = _production_order_date(row)
+        if row_date and row_date != work_date:
+            return False
+    if shift:
+        row_shift = _production_order_shift(row)
+        if row_shift and row_shift != shift:
+            return False
+    if machine:
+        if not _machine_matches_row(row, machine):
+            return False
+    return True
+
+
 def _production_orders_from_master(
-    rows: list[dict[str, object]], work_date: str = ""
+    rows: list[dict[str, object]],
+    work_date: str = "",
+    *,
+    shift: str = "",
+    machine: str = "",
 ) -> list[str]:
-    all_orders: list[str] = []
-    matching: list[str] = []
-    has_dates = False
+    unique: list[str] = []
+    seen: set[str] = set()
     for row in rows:
         code = _production_order_code(row)
         if not code:
             continue
-        all_orders.append(code)
-        row_date = _production_order_date(row)
-        if row_date:
-            has_dates = True
-        if not work_date or not row_date or row_date == work_date:
-            matching.append(code)
-    chosen = matching if (not has_dates or matching) else all_orders
-    unique: list[str] = []
-    seen: set[str] = set()
-    for order in chosen:
-        key = order.casefold()
+        if not _row_matches_production_filters(
+            row, work_date=work_date, shift=shift, machine=machine
+        ):
+            continue
+        key = code.casefold()
         if key in seen:
             continue
         seen.add(key)
-        unique.append(order)
+        unique.append(code)
     return sorted(unique, key=str.casefold)
 
 
@@ -1952,7 +2210,7 @@ def _frontend_index_path() -> Path:
         return Path(configured).expanduser().resolve() / "index.html"
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         return Path(sys._MEIPASS) / "assets" / "frontend" / "index.html"
-    return Path(__file__).resolve().parents[3] / "frontend" / "index.html"
+    return _project_root() / "frontend" / "index.html"
 
 
 def _frontend_font_path(filename: str) -> Path | None:
@@ -2430,6 +2688,8 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
             if parsed.path == "/api/production-orders":
                 query = urllib.parse.parse_qs(parsed.query)
                 work_date = str(query.get("work_date", [""])[0]).strip()
+                shift = str(query.get("shift", [""])[0]).strip()
+                machine = str(query.get("machine", [""])[0]).strip()
                 try:
                     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", work_date):
                         raise ValueError
@@ -2451,16 +2711,24 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     }
                     for item in store.recent(200)
                 ]
-                orders, source, fallback_error = _load_production_orders(work_date)
-                if not orders:
-                    orders = _production_orders_from_master(rows, work_date)
-                    source = "local"
+                orders, source, fallback_error, filter_relaxed = _load_production_orders(
+                    work_date, shift=shift, machine=machine
+                )
+                if not orders and not _master_production_orders_configured():
+                    orders = _production_orders_from_master(
+                        rows, work_date, shift=shift, machine=machine
+                    )
+                    if orders:
+                        source = "local"
                 self.send_json(
                     200,
                     {
                         "ok": True,
                         "source": source,
                         "work_date": work_date,
+                        "shift": shift or None,
+                        "machine": machine or None,
+                        "filter_relaxed": filter_relaxed,
                         "orders": orders,
                         "fallback_error": fallback_error or None,
                     },
@@ -2856,6 +3124,7 @@ def run(args: argparse.Namespace) -> int:
 
 
 def main() -> None:
+    _load_local_dotenv()
     try:
         raise SystemExit(run(build_parser().parse_args()))
     except Exception as exc:

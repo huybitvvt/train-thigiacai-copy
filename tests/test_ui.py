@@ -1214,7 +1214,10 @@ def test_ui_records_table_shows_bi_and_nvl_weights() -> None:
     assert 'Máy cách nhiệt' in TEST_UI_HTML
     assert '<select id="sourceOrder" disabled>' in TEST_UI_HTML
     assert 'placeholder="Nhập lệnh SX"' not in TEST_UI_HTML
-    assert "/api/production-orders?work_date=" in TEST_UI_HTML
+    assert "function productionOrdersQuery(" in TEST_UI_HTML
+    assert "params.set('shift'" in TEST_UI_HTML
+    assert "params.set('machine'" in TEST_UI_HTML
+    assert "reloadProductionOrdersForFilters" in TEST_UI_HTML
     assert "$('sourceDate').addEventListener('change'" in TEST_UI_HTML
     assert 'id="biWeight"' in TEST_UI_HTML
     assert 'value="0.16"' in TEST_UI_HTML
@@ -1276,16 +1279,189 @@ def test_production_orders_follow_selected_date() -> None:
 
 def test_production_orders_read_master_table_rows() -> None:
     rows = [
-        {"ma_lsx": "LSX-A", "ngay": "01/07/2026"},
-        {"so_lenh": "LSX-B", "work_date": "2026-07-01"},
-        {"ma_lsx": "LSX-C", "ngay": "2026-07-02"},
+        {"ma_lsx": "LSX-A", "ngay": "01/07/2026", "ca": "12C1"},
+        {"so_lenh": "LSX-B", "work_date": "2026-07-01", "ca": "12C1"},
+        {"ma_lsx": "LSX-C", "ngay": "2026-07-02", "ca": "12C2"},
+        {"ma_lsx": "LSX-D", "ngay": "01/07/2026", "ca": "12C2"},
     ]
     assert test_ui_module._production_orders_from_master(rows, "2026-07-01") == [
         "LSX-A",
         "LSX-B",
+        "LSX-D",
     ]
+    assert test_ui_module._production_orders_from_master(
+        rows, "2026-07-01", shift="12C1"
+    ) == ["LSX-A", "LSX-B"]
+    assert test_ui_module._production_orders_from_master(
+        rows, "2026-07-01", shift="12C1", machine="Máy cách nhiệt"
+    ) == ["LSX-A", "LSX-B"]
+    assert test_ui_module._production_orders_from_master(
+        rows, "2026-07-01", shift="12C2"
+    ) == ["LSX-D"]
     assert test_ui_module._normalize_source_date("01/07/2026") == "2026-07-01"
     assert test_ui_module._production_order_code({"Lenh_SX": "  PO-9  "}) == "PO-9"
+    assert test_ui_module._production_order_code({"MÃ LỆNH": "LSX-DH048"}) == "LSX-DH048"
+    assert test_ui_module._normalize_source_date("18/08/2026") == "2026-08-18"
+
+
+def test_production_orders_match_machine_by_product_name() -> None:
+    rows = [
+        {
+            "MÃ LỆNH": "LSX-DH048",
+            "CA": "12C1",
+            "BẮT ĐẦU": "18/08/2026",
+            "TÊN HÀNG": "Tấm cách nhiệt Ranko P02",
+        },
+        {
+            "MÃ LỆNH": "LSX-BB01",
+            "CA": "12C1",
+            "BẮT ĐẦU": "18/08/2026",
+            "TÊN HÀNG": "Bao bì PE 50kg",
+        },
+    ]
+    assert test_ui_module._production_orders_from_master(
+        rows,
+        "2026-08-18",
+        shift="12C1",
+        machine="Máy cách nhiệt",
+    ) == ["LSX-DH048"]
+    assert test_ui_module._production_orders_from_master(
+        rows,
+        "2026-08-18",
+        shift="12C1",
+        machine="Máy Bao Bì",
+    ) == ["LSX-BB01"]
+
+
+def test_master_supabase_table_filters_by_machine(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "ROLL_SCALE_PRODUCTION_ORDER_SUPABASE_URL",
+        "https://example-master.supabase.co",
+    )
+    monkeypatch.setenv(
+        "ROLL_SCALE_PRODUCTION_ORDER_SUPABASE_SERVICE_KEY",
+        "master-key",
+    )
+
+    rows = [
+        {
+            "MÃ LỆNH": "LSX-DH048",
+            "CA": "12C1",
+            "BẮT ĐẦU": "18/08/2026",
+            "TÊN HÀNG": "Tấm cách nhiệt Ranko P02",
+        },
+        {
+            "MÃ LỆNH": "LSX-BB01",
+            "CA": "12C1",
+            "BẮT ĐẦU": "18/08/2026",
+            "TÊN HÀNG": "Bao bì PE 50kg",
+        },
+    ]
+
+    def fake_fetch(url: str, key: str, table: str, **kwargs: object) -> list[dict[str, object]]:
+        assert url == "https://example-master.supabase.co"
+        assert key == "master-key"
+        assert table == "lenh_sx"
+        return rows
+
+    monkeypatch.setattr(test_ui_module, "fetch_supabase_rows", fake_fetch)
+    monkeypatch.setattr(
+        test_ui_module,
+        "_configured_production_order_tables",
+        lambda: ["lenh_sx"],
+    )
+
+    orders, source, error, relaxed = test_ui_module._load_production_orders(
+        "2026-08-18",
+        shift="12C1",
+        machine="Máy Bao Bì",
+    )
+    assert orders == ["LSX-BB01"]
+    assert source == "master:lenh_sx"
+    assert error == ""
+    assert relaxed is None
+
+    insulation, _, _, _ = test_ui_module._load_production_orders(
+        "2026-08-18",
+        shift="12C1",
+        machine="Máy cách nhiệt",
+    )
+    assert insulation == ["LSX-DH048"]
+
+
+def test_load_production_orders_reads_dotenv_before_master_check(
+    monkeypatch, tmp_path: Path
+) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "\n".join(
+            [
+                "ROLL_SCALE_PRODUCTION_ORDER_SUPABASE_URL=https://example-master.supabase.co",
+                "ROLL_SCALE_PRODUCTION_ORDER_SUPABASE_SERVICE_KEY=master-key",
+                "ROLL_SCALE_PRODUCTION_ORDER_TABLE=lenh_sx",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("ROLL_SCALE_PRODUCTION_ORDER_SUPABASE_URL", raising=False)
+    monkeypatch.delenv("ROLL_SCALE_PRODUCTION_ORDER_SUPABASE_SERVICE_KEY", raising=False)
+    monkeypatch.setattr(test_ui_module, "_project_root", lambda: tmp_path)
+
+    def fake_fetch(url: str, key: str, table: str, **kwargs: object) -> list[dict[str, object]]:
+        return [
+            {
+                "MÃ LỆNH": "LSX-DH048",
+                "CA": "12C1",
+                "BẮT ĐẦU": "18/08/2026",
+                "TÊN HÀNG": "Tấm cách nhiệt Ranko P02",
+            }
+        ]
+
+    monkeypatch.setattr(test_ui_module, "fetch_supabase_rows", fake_fetch)
+    monkeypatch.setattr(
+        test_ui_module,
+        "_configured_production_order_tables",
+        lambda: ["lenh_sx"],
+    )
+
+    orders, source, error, relaxed = test_ui_module._load_production_orders(
+        "2026-08-18",
+        shift="12C1",
+        machine="Máy cách nhiệt",
+    )
+    assert orders == ["LSX-DH048"]
+    assert source == "master:lenh_sx"
+    assert error == ""
+    assert relaxed is None
+
+
+def test_production_orders_exclude_mismatched_measurement_tags() -> None:
+    rows = [
+        {
+            "weight_raw": (
+                "SOURCE_DATE=2026-08-18; SOURCE_SHIFT=12C1; "
+                "SOURCE_MACHINE=Máy cách nhiệt; SOURCE_PRODUCTION_ORDER=LSX-DH048"
+            )
+        },
+        {
+            "weight_raw": (
+                "SOURCE_DATE=2026-08-18; SOURCE_SHIFT=12C1; "
+                "SOURCE_MACHINE=Máy tái chế; SOURCE_PRODUCTION_ORDER=LSX-DH039"
+            )
+        },
+        {
+            "weight_raw": (
+                "SOURCE_DATE=2026-08-18; SOURCE_SHIFT=12C1; "
+                "SOURCE_MACHINE=Máy tái chế; SOURCE_PRODUCTION_ORDER=fgfgfgfgfgfgfg"
+            )
+        },
+    ]
+    assert test_ui_module._production_orders_from_master(
+        rows,
+        "2026-08-18",
+        shift="12C1",
+        machine="Máy cách nhiệt",
+    ) == ["LSX-DH048"]
 
 
 def test_remote_product_image_does_not_request_redundant_signed_url() -> None:
