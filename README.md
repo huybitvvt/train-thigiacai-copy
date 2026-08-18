@@ -186,7 +186,7 @@ Mở `http://127.0.0.1:8080` rồi vận hành như sau:
 1. Cho phép quyền camera, bấm `Làm mới camera`, sau đó chọn đúng camera vật lý trong dropdown của từng trạm. Không dựa vào thứ tự camera `0/1/2` của hệ điều hành.
 2. Ánh xạ browser `deviceId` được lưu trong `localStorage` theo `gateway_id`. Một camera vật lý không thể gán cho hai trạm. Nếu đổi browser/profile/cổng USB làm `deviceId` đổi, chọn lại camera.
 3. Bấm `Mở camera đã gán`. Khi camera rớt kết nối, card chuyển sang `MẤT KẾT NỐI`; giao diện chỉ thử lại đúng `deviceId` đã gán và từ chối stream nếu browser trả nhầm camera. Sự kiện cắm/rút USB cũng kích hoạt làm mới và reconnect.
-4. Chọn trạm bằng card hoặc phím `1`, `2`, `3`. `Space` chụp cân lõi; số cân và ảnh đầu được giữ nguyên. Sau đó đặt sản phẩm cùng tem QR trong khung rồi nhấn `P` hoặc nút `Chụp cân SP` để đọc số cân sản phẩm và mã SP từ ảnh thứ hai.
+4. Chọn trạm bằng card hoặc phím `1`, `2`, `3`. `Space` luôn chụp bước còn thiếu kế tiếp: cân lõi trước, rồi cân sản phẩm. Số cân và ảnh đã chụp được giữ nguyên; QR được nhận diện độc lập từ ảnh hoặc có thể nhập/quét thủ công.
 5. Kiểm tra hai số cân, hai preview bằng chứng và mã SP tự đọc. `Enter` chỉ lưu khi đủ hai số cân + hai ảnh + mã SP trong cùng event. Dùng `Bỏ lần đang xem` nếu thật sự muốn hủy cả phiên.
 6. Sau khi SQLite commit thành công, tùy chọn auto-advance chọn trạm kế tiếp theo vòng tròn. Checkbox trên giao diện có thể đổi hành vi trong phiên hiện tại.
 
@@ -206,20 +206,28 @@ thực tế, rồi thực hiện một lần:
    một request Gemini; kết quả trả về theo đúng tên từng chỉ số. Vùng không chắc chắn
    hiển thị `--`, không tự đoán.
 
-Có thể dành riêng camera Wi-Fi EZVIZ C6N cho bảng chỉ số mà không thay camera cân:
+Camera Wi-Fi/IP có thể dùng chung cho cân, QR và bảng nhiều chỉ số, hoặc chỉ dành cho
+bảng. Thiết lập một lần trên từng PC vận hành:
 
-1. Đặt camera EZVIZ và PC vận hành trong cùng mạng LAN, xác định IP cố định/DHCP
-   reservation cho camera.
-2. Trong SplitCam hoặc OBS, thêm nguồn RTSP theo mẫu
-   `rtsp://admin:[MÃ XÁC THỰC]@[IP CAMERA]:554/ch1/main`, rồi bật camera ảo.
-3. Trên giao diện, mở `Bảng nhiều chỉ số`, chọn camera SplitCam/OBS tại
-   `Camera bảng riêng`, rồi bấm `Mở camera bảng`. Ánh xạ `deviceId` camera ảo được
-   lưu cục bộ theo trạm; khi đóng chế độ bảng, luồng camera ảo dừng và giao diện trở
-   về camera cân.
+1. Đặt camera EZVIZ và PC trong cùng mạng LAN. Giữ IP camera ổn định bằng DHCP
+   reservation; không mở/forward cổng 554 ra Internet.
+2. Cài và mở SplitCam trên PC. Trên trang web bấm `Mở camera`, nhập IP camera và mã
+   xác thực 6 ký tự, rồi bấm `Tạo & sao chép RTSP`. Trang chỉ tạo URL trong bộ nhớ và
+   clipboard của máy khách.
+3. Trong SplitCam chọn `Media Layers +` → `IP Camera`, dán URL, bấm `Add` và kiểm tra
+   đã có hình. Quay lại web, chọn camera ảo SplitCam, chọn `Cân + QR và Bảng nhiều chỉ
+   số`, rồi bấm `Xác nhận kết nối`.
+4. Nếu muốn giữ camera cân USB và chỉ dùng EZVIZ cho bảng, chọn `Chỉ Bảng nhiều chỉ
+   số`. Có thể đổi lại nguồn tại phần `Nguồn camera cho bảng`.
 
-Không nhập URL RTSP hoặc mã xác thực vào Render, Git hay nội dung chat. Render không
-thể kết nối trực tiếp IP riêng trong LAN; SplitCam/OBS trên PC là cầu nối RTSP thành
-camera trình duyệt và thông tin đăng nhập chỉ nằm tại PC vận hành.
+Render redeploy không cần biến môi trường RTSP và không kết nối thẳng vào camera LAN.
+Cấu hình nguồn nằm trong SplitCam, còn ánh xạ `deviceId` chỉ lưu trong browser profile
+trên PC khách; vì vậy cùng PC + cùng browser profile thì không phải nhập lại mã sau
+redeploy. Máy khách mới vẫn phải cài SplitCam và thêm RTSP một lần.
+
+Không ghi URL RTSP, mã xác thực hoặc ảnh tem thiết bị vào Render Environment, Git hay
+nội dung chat. Mã xác thực trong khung thiết lập bị xóa khi đóng và không được gửi tới
+Render/Supabase; lưu ý clipboard tạm thời chứa URL đầy đủ sau khi bấm sao chép.
 
 Camera phải giữ nguyên vị trí sau khi gán. Nếu camera bị xoay, zoom, đổi độ phân giải
 hoặc bảng bị dịch chuyển, xóa và gán lại vùng. Mỗi ảnh gửi Gemini gồm crop gốc và bản

@@ -1731,6 +1731,21 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "function captureSource(" in TEST_UI_HTML
     assert "session.panelStream&&session.panelVideo.videoWidth" in TEST_UI_HTML
     assert "URL và mã xác thực không được gửi lên Render" in TEST_UI_HTML
+    assert 'id="cameraSetupModal"' in TEST_UI_HTML
+    assert 'id="cameraSetupDevice"' in TEST_UI_HTML
+    assert 'id="cameraSetupTarget"' in TEST_UI_HTML
+    assert 'id="ipCameraHost"' in TEST_UI_HTML
+    assert 'id="ipCameraVerification" type="password"' in TEST_UI_HTML
+    assert 'id="copyIpCameraUrlBtn"' in TEST_UI_HTML
+    assert 'id="connectConfiguredCameraBtn"' in TEST_UI_HTML
+    assert "function normalizeIpCameraHost(" in TEST_UI_HTML
+    assert "function copyIpCameraUrl(" in TEST_UI_HTML
+    assert "function connectConfiguredCamera(" in TEST_UI_HTML
+    assert "IP_CAMERA_HOST_KEY" in TEST_UI_HTML
+    assert "localStorage.setItem(IP_CAMERA_HOST_KEY,values.host)" in TEST_UI_HTML
+    assert "localStorage.setItem(IP_CAMERA_HOST_KEY,url)" not in TEST_UI_HTML
+    assert "cameraSetupTarget').value='shared'" in TEST_UI_HTML
+    assert "Đã kết nối camera dùng chung cho cân, QR và bảng nhiều chỉ số" in TEST_UI_HTML
 
 
 def test_ui_weighs_multiple_rounds_with_split_second_table() -> None:
