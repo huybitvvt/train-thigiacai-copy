@@ -254,10 +254,13 @@ def post_measurement(
 ) -> dict[str, object]:
     body = dict(payload)
     body["image_base64"] = base64.b64encode(Path(image_path).read_bytes()).decode("ascii")
-    # The single captured frame is specifically the core-weight evidence image.
-    # Keep the established image_base64 field so older deployed Edge Functions
-    # remain compatible while newer functions persist it under core_image_*.
-    body["image_role"] = "core_weight"
+    # The shared ingest endpoint routes one-photo inventory checks separately
+    # while preserving the established core-weight role for production slips.
+    body["image_role"] = (
+        "inventory_check"
+        if body.get("workflow") == "inventory_check"
+        else "core_weight"
+    )
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",

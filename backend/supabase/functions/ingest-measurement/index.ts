@@ -3,6 +3,7 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 const MAX_IMAGE_BYTES = 6 * 1024 * 1024;
 const UNITS = new Set(["kg", "g", "lb"]);
 const MEASUREMENT_TABLE = "can_tu_dong";
+const INVENTORY_TABLE = "can_kiem_kho";
 const SECRET_TABLE = "roll_scale_secrets";
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/i;
@@ -95,6 +96,35 @@ function storedValueMatches(existing: unknown, incoming: unknown): boolean {
 function storedHashMatches(existing: unknown, incoming: string | null): boolean {
   if (existing === null || existing === undefined) return true;
   return incoming !== null && String(existing).toLowerCase() === incoming;
+}
+
+function sameInventoryCheck(
+  existing: Record<string, unknown>,
+  productCode: string,
+  weight: number,
+  coreWeight: number,
+  tareWeight: number,
+  unit: string,
+  capturedAt: string,
+  gatewayId: string,
+  stationId: string | null,
+  cameraId: string | null,
+  analysisId: string | null,
+  frameSha256: string | null,
+  payloadHash: string | null,
+): boolean {
+  return existing.ma_san_pham === productCode &&
+    Number(existing.khoi_luong) === weight &&
+    Number(existing.khoi_luong_loi) === coreWeight &&
+    Number(existing.khoi_luong_bi) === tareWeight &&
+    existing.don_vi === unit &&
+    Date.parse(String(existing.captured_at)) === Date.parse(capturedAt) &&
+    storedValueMatches(existing.gateway_id, gatewayId) &&
+    storedValueMatches(existing.station_id, stationId) &&
+    storedValueMatches(existing.camera_id, cameraId) &&
+    storedValueMatches(existing.analysis_id, analysisId) &&
+    storedHashMatches(existing.frame_sha256, frameSha256) &&
+    storedHashMatches(existing.payload_hash, payloadHash);
 }
 
 type CloudinaryUpload = {
@@ -488,8 +518,16 @@ Deno.serve(async (request: Request) => {
     return json(200, { ok: true, stored: true });
   }
 
+  const workflow = typeof body.workflow === "string" ? body.workflow.trim() : "production";
+  const inventoryCheck = workflow === "inventory_check";
+  if (!inventoryCheck && workflow !== "production" && workflow !== "") {
+    return json(422, { ok: false, error: "invalid_workflow" });
+  }
   const eventId = typeof body.event_id === "string" ? body.event_id : "";
   const qrCode = typeof body.qr_code === "string" ? body.qr_code.trim() : "";
+  const productCode = typeof body.product_code === "string"
+    ? body.product_code.trim()
+    : qrCode;
   const suppliedGatewayId = typeof body.gateway_id === "string" ? body.gateway_id.trim() : null;
   const legacyDeviceId = typeof body.device_id === "string" ? body.device_id.trim() : null;
   const gatewayId = suppliedGatewayId || legacyDeviceId || "";
@@ -504,6 +542,12 @@ Deno.serve(async (request: Request) => {
     : null;
   const unit = typeof body.unit === "string" ? body.unit : "";
   const weight = typeof body.weight === "number" ? body.weight : Number.NaN;
+  const coreWeight = typeof body.core_weight === "number"
+    ? body.core_weight
+    : Number.NaN;
+  const inventoryTareWeight = typeof body.tare_weight === "number"
+    ? body.tare_weight
+    : Number.NaN;
   const productWeight = typeof body.product_weight === "number"
     ? body.product_weight
     : Number.NaN;
@@ -536,7 +580,7 @@ Deno.serve(async (request: Request) => {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(eventId)) {
     return json(422, { ok: false, error: "invalid_event_id" });
   }
-  if (!qrCode || qrCode.length > 512) {
+  if (!qrCode || qrCode.length > 512 || (inventoryCheck && productCode !== qrCode)) {
     return json(422, { ok: false, error: "invalid_qr_code" });
   }
   if (body.gateway_id !== undefined && body.gateway_id !== null && !suppliedGatewayId) {
@@ -583,13 +627,21 @@ Deno.serve(async (request: Request) => {
   if (imageBase64.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4 + 4) {
     return json(413, { ok: false, error: "image_too_large" });
   }
-  if (!Number.isFinite(productWeight) || productWeight < 0) {
+  if (!inventoryCheck && (!Number.isFinite(productWeight) || productWeight < 0)) {
     return json(422, { ok: false, error: "invalid_product_weight" });
+  }
+  if (
+    inventoryCheck &&
+    (!Number.isFinite(coreWeight) || coreWeight < 0 ||
+      !Number.isFinite(inventoryTareWeight) || inventoryTareWeight < 0)
+  ) {
+    return json(422, { ok: false, error: "invalid_inventory_weights" });
   }
   if (productImageBase64.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4 + 4) {
     return json(413, { ok: false, error: "product_image_too_large" });
   }
-  if (imageRole && imageRole !== "core_weight") {
+  const expectedImageRole = inventoryCheck ? "inventory_check" : "core_weight";
+  if (imageRole && imageRole !== expectedImageRole) {
     return json(422, { ok: false, error: "invalid_image_role" });
   }
 
@@ -631,6 +683,175 @@ Deno.serve(async (request: Request) => {
   const supabase = createClient(supabaseUrl, serviceKey, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
+
+  if (inventoryCheck) {
+    const inventorySelect =
+      "id,event_id,ma_san_pham,khoi_luong,khoi_luong_loi,khoi_luong_bi,don_vi," +
+      "captured_at,image_path,image_url,image_public_id,gateway_id,station_id," +
+      "camera_id,analysis_id,frame_sha256,payload_hash";
+    const { data: existingInventory, error: inventoryLookupError } = await supabase
+      .from(INVENTORY_TABLE)
+      .select(inventorySelect)
+      .eq("event_id", eventId)
+      .maybeSingle();
+    if (inventoryLookupError) {
+      return json(500, { ok: false, error: "inventory_lookup_failed" });
+    }
+    if (existingInventory) {
+      const existingRow = existingInventory as unknown as Record<string, unknown>;
+      if (
+        !sameInventoryCheck(
+          existingRow,
+          productCode,
+          weight,
+          coreWeight,
+          inventoryTareWeight,
+          unit,
+          capturedAt,
+          gatewayId,
+          stationId,
+          cameraId,
+          analysisId,
+          frameSha256,
+          payloadHash,
+        )
+      ) {
+        return json(409, { ok: false, error: "event_id_conflict" });
+      }
+      return json(200, {
+        ok: true,
+        id: existingRow.id,
+        event_id: eventId,
+        image_url: existingRow.image_url,
+        image_public_id: existingRow.image_public_id,
+        gateway_id: existingRow.gateway_id,
+        station_id: existingRow.station_id,
+        camera_id: existingRow.camera_id,
+        analysis_id: existingRow.analysis_id,
+        frame_sha256: existingRow.frame_sha256,
+        payload_hash: existingRow.payload_hash,
+        workflow: "inventory_check",
+        duplicate: true,
+      });
+    }
+
+    const inventoryNow = new Date().toISOString();
+    const { error: inventoryDeviceError } = await supabase.from("devices").upsert(
+      { id: gatewayId, last_seen_at: inventoryNow },
+      { onConflict: "id" },
+    );
+    if (inventoryDeviceError) {
+      return json(500, { ok: false, error: "device_upsert_failed" });
+    }
+    const { error: inventoryRollError } = await supabase.from("rolls").upsert(
+      { qr_code: productCode, last_seen_at: inventoryNow },
+      { onConflict: "qr_code" },
+    );
+    if (inventoryRollError) {
+      return json(500, { ok: false, error: "roll_upsert_failed" });
+    }
+    const inventoryDate = new Date(capturedAt);
+    const inventoryYear = inventoryDate.getUTCFullYear();
+    const inventoryMonth = String(inventoryDate.getUTCMonth() + 1).padStart(2, "0");
+    const inventoryDay = String(inventoryDate.getUTCDate()).padStart(2, "0");
+    let inventoryUploaded: CloudinaryUpload;
+    try {
+      inventoryUploaded = await uploadToCloudinary(
+        image,
+        `roll-captures/${gatewayId}/${inventoryYear}/${inventoryMonth}/${inventoryDay}/inventory-check/${eventId}`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "cloudinary_upload_failed";
+      return json(500, { ok: false, error: message.split(":", 1)[0] });
+    }
+    const { data: insertedInventory, error: inventoryInsertError } = await supabase
+      .from(INVENTORY_TABLE)
+      .insert({
+        event_id: eventId,
+        ma_san_pham: productCode,
+        khoi_luong: weight,
+        khoi_luong_loi: coreWeight,
+        khoi_luong_bi: inventoryTareWeight,
+        don_vi: unit,
+        captured_at: capturedAt,
+        image_path: inventoryUploaded.publicId,
+        image_url: inventoryUploaded.secureUrl,
+        image_public_id: inventoryUploaded.publicId,
+        gateway_id: gatewayId,
+        station_id: stationId,
+        camera_id: cameraId,
+        analysis_id: analysisId,
+        frame_sha256: frameSha256,
+        payload_hash: payloadHash,
+        weight_source: weightSource,
+        qr_source: qrSource,
+        status: "confirmed",
+        metadata: {
+          ingested_at: inventoryNow,
+          weight_raw: weightRaw,
+          weight_stable: weightStable,
+          workflow: "inventory_check",
+        },
+      })
+      .select(inventorySelect)
+      .single();
+    if (inventoryInsertError) {
+      if (inventoryInsertError.code === "23505") {
+        const { data: racedInventory } = await supabase
+          .from(INVENTORY_TABLE)
+          .select(inventorySelect)
+          .eq("event_id", eventId)
+          .single();
+        if (racedInventory) {
+          const racedRow = racedInventory as unknown as Record<string, unknown>;
+          if (
+            !sameInventoryCheck(
+              racedRow,
+              productCode,
+              weight,
+              coreWeight,
+              inventoryTareWeight,
+              unit,
+              capturedAt,
+              gatewayId,
+              stationId,
+              cameraId,
+              analysisId,
+              frameSha256,
+              payloadHash,
+            )
+          ) {
+            return json(409, { ok: false, error: "event_id_conflict" });
+          }
+          return json(200, {
+            ok: true,
+            id: racedRow.id,
+            event_id: eventId,
+            image_url: racedRow.image_url,
+            image_public_id: racedRow.image_public_id,
+            workflow: "inventory_check",
+            duplicate: true,
+          });
+        }
+      }
+      return json(500, { ok: false, error: "inventory_insert_failed" });
+    }
+    return json(201, {
+      ok: true,
+      id: insertedInventory.id,
+      event_id: eventId,
+      image_url: inventoryUploaded.secureUrl,
+      image_public_id: inventoryUploaded.publicId,
+      gateway_id: gatewayId,
+      station_id: stationId,
+      camera_id: cameraId,
+      analysis_id: analysisId,
+      frame_sha256: frameSha256,
+      payload_hash: payloadHash,
+      workflow: "inventory_check",
+      duplicate: false,
+    });
+  }
 
   const { data: existing, error: lookupError } = await supabase
     .from(MEASUREMENT_TABLE)

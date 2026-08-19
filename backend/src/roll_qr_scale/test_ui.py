@@ -733,6 +733,36 @@ def _local_measurement_items(
     return items
 
 
+def _local_inventory_items(
+    store: MeasurementStore,
+    limit: int,
+) -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    for item in store.recent_inventory_checks(limit):
+        has_image = bool(item.image_path and Path(item.image_path).is_file())
+        image_url = (
+            f"/api/inventory-image?event_id={urllib.parse.quote(item.event_id)}"
+            if has_image
+            else item.remote_image_url
+        )
+        items.append(
+            {
+                "id": item.remote_id or item.id,
+                "event_id": item.event_id,
+                "ma_san_pham": item.product_code,
+                "khoi_luong": item.weight,
+                "khoi_luong_loi": item.core_weight,
+                "khoi_luong_bi": item.tare_weight,
+                "don_vi": item.unit,
+                "captured_at": item.captured_at,
+                "image_url": image_url,
+                "sync_status": item.sync_status,
+                "sync_error": item.sync_error,
+            }
+        )
+    return items
+
+
 def _env_flag(name: str, default: bool = False) -> bool:
     value = os.environ.get(name)
     if value is None:
@@ -1235,8 +1265,8 @@ class StationUIService:
         qr_code: str = "",
     ) -> dict[str, object]:
         """Durably save each accepted weighing step before final confirmation."""
-        if kind not in {"core", "product"}:
-            raise ValueError("capture_kind phải là core hoặc product")
+        if kind not in {"core", "product", "inventory"}:
+            raise ValueError("capture_kind phải là core, product hoặc inventory")
         if station_id not in {str(item["station_id"]) for item in self.station_configs}:
             raise ValueError("station_id không hợp lệ")
         uuid.UUID(event_id)
@@ -1444,7 +1474,7 @@ class StationUIService:
         except (ValueError, TypeError, AttributeError):
             return
         folder = self.sessions.staging_dir / station_id
-        for suffix in ("_core.jpg", "_product.jpg", "_steps.json"):
+        for suffix in ("_core.jpg", "_product.jpg", "_inventory.jpg", "_steps.json"):
             try:
                 (folder / f"{event_id}{suffix}").unlink(missing_ok=True)
             except OSError:
@@ -1526,8 +1556,8 @@ class StationUIService:
         recognition_provider = recognition_provider.strip().lower()
         if recognition_provider not in AI_RECOGNITION_PROVIDERS:
             raise ValueError("Bộ AI nhận diện phải là gemini hoặc codex")
-        if capture_kind not in {"", "core", "product"}:
-            raise ValueError("capture_kind phải là core hoặc product")
+        if capture_kind not in {"", "core", "product", "inventory"}:
+            raise ValueError("capture_kind phải là core, product hoặc inventory")
         quality = self.assess_quality(frame)
         quality_payload, quality_pass = self.quality_result(quality)
         # QR belongs to the product step. Avoid spending CPU decoding unrelated
@@ -1574,7 +1604,7 @@ class StationUIService:
         crop_retry_method: str | None = None
         if self.weight_engine == "gemini":
             provider_prefix = recognition_provider
-            optimized_capture = capture_kind in {"core", "product"}
+            optimized_capture = capture_kind in {"core", "product", "inventory"}
             if not optimized_capture:
                 roi = None
                 roi_method = f"{provider_prefix}-full-frame"
@@ -1675,7 +1705,7 @@ class StationUIService:
                 suggestion_raw = suggestion.raw
                 suggestions = [suggestion]
                 crop_is_available = bool(
-                    capture_kind in {"core", "product"} and roi is not None
+                    capture_kind in {"core", "product", "inventory"} and roi is not None
                 )
                 # Full-frame is the normal path: Gemini can locate the small scale
                 # display from its factory context. Only retry a focused LED crop
@@ -1910,7 +1940,7 @@ class StationUIService:
         evidence_image: str | None = None
         evidence_zoom_applied = False
         evidence_zoom_method: str | None = None
-        if self.weight_engine == "gemini" and capture_kind in {"core", "product"}:
+        if self.weight_engine == "gemini" and capture_kind in {"core", "product", "inventory"}:
             located: tuple[NormalizedROI, str] | None
             if configured_roi is not None and auto_roi_requested:
                 located = configured_roi, "camera-calibrated"
@@ -2152,6 +2182,159 @@ class StationUIService:
             "remote_id": current.remote_id,
             "remote_image_url": current.remote_image_url,
             "remote_image_public_id": getattr(current, "remote_image_public_id", None),
+            "sync_error": current.sync_error,
+            "pending_count": self.store.pending_count(),
+        }
+
+    def capture_inventory(
+        self,
+        product_code: str,
+        weight: float,
+        core_weight: float,
+        tare_weight: float,
+        unit: str,
+        frame: np.ndarray,
+        vision_confirmed: bool = False,
+        weight_raw: str = "",
+        *,
+        event_id: str | None = None,
+        analysis_id: str | None = None,
+        station_id: str | None = None,
+        camera_id: str | None = None,
+        frame_sha256: str | None = None,
+    ) -> dict[str, object]:
+        """Commit one photographed inventory weight without a core capture step."""
+
+        product_code = product_code.strip()
+        if not product_code:
+            decoded = self.decode_qr(frame)
+            if not decoded.get("found"):
+                raise ValueError("Chưa có mã sản phẩm; hãy quét QR hoặc nhập thủ công")
+            product_code = str(decoded["qr_code"])
+            qr_source = f"camera:{decoded['decoder']}"
+        else:
+            qr_source = "test-ui:input"
+        if len(product_code) > 512:
+            raise ValueError("Mã sản phẩm dài quá 512 ký tự")
+        if unit not in UNITS:
+            raise ValueError("Đơn vị không hợp lệ")
+        for label, value in (
+            ("Khối lượng", weight),
+            ("Khối lượng lõi", core_weight),
+            ("Khối lượng bì", tare_weight),
+        ):
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{label} phải là số không âm")
+        quality = self.assess_quality(frame)
+        quality_payload, quality_pass = self.quality_result(quality)
+        if not quality_pass:
+            raise ValueError(
+                "Ảnh chưa đạt chất lượng: "
+                + "; ".join(str(issue) for issue in quality_payload["issues"])
+            )
+
+        identity_values = (event_id, analysis_id, station_id, camera_id)
+        bound_capture = any(identity_values) or bool(frame_sha256)
+        if bound_capture and not all(identity_values):
+            raise ValueError("Cần đủ event_id, analysis_id, station_id và camera_id")
+        computed_frame_sha = jpeg_sha256(encode_staged_jpeg(frame))
+        if frame_sha256 and frame_sha256.lower() != computed_frame_sha:
+            raise AnalysisBindingMismatch("frame_sha256 không khớp ảnh kiểm kho")
+
+        captured_at: str | None = None
+        if bound_capture:
+            assert event_id and analysis_id and station_id and camera_id
+            try:
+                binding = self.sessions.validate(
+                    analysis_id,
+                    event_id=event_id,
+                    station_id=station_id,
+                    camera_id=camera_id,
+                    frame_sha256=computed_frame_sha,
+                )
+                captured_at = binding.captured_at
+            except AnalysisBindingNotFound:
+                existing = self.store.get_inventory_check(event_id)
+                if existing is None:
+                    raise
+                expected = (
+                    existing.analysis_id,
+                    existing.station_id,
+                    existing.camera_id,
+                    existing.frame_sha256,
+                )
+                supplied = (analysis_id, station_id, camera_id, computed_frame_sha)
+                if supplied != expected:
+                    raise AnalysisBindingMismatch(
+                        "Danh tính lần lưu kiểm kho không khớp bản ghi cục bộ"
+                    )
+                captured_at = existing.captured_at
+
+        with self._lock:
+            capture_key = frame_fingerprint(frame)
+            if not bound_capture:
+                now = time.monotonic()
+                if now - self._recent.get(capture_key, float("-inf")) < self.duplicate_window:
+                    raise ValueError("Ảnh này vừa được lưu; hãy chụp khung hình mới")
+            check, duplicate = self.store.save_inventory_check_idempotent(
+                product_code=product_code,
+                weight=weight,
+                core_weight=core_weight,
+                tare_weight=tare_weight,
+                unit=unit,
+                frame=frame,
+                weight_source=(
+                    "camera-gemini:inventory"
+                    if vision_confirmed and "GEMINI" in weight_raw
+                    else "camera-ocr:inventory"
+                    if vision_confirmed
+                    else "manual:inventory"
+                ),
+                needs_sync=self.sync_worker is not None,
+                qr_source=qr_source,
+                weight_raw=_persistable_weight_raw(
+                    weight_raw,
+                    weight=weight,
+                    vision_confirmed=vision_confirmed,
+                ),
+                weight_stable=True,
+                event_id=event_id,
+                captured_at=captured_at,
+                gateway_id=self.gateway_id if bound_capture else "",
+                station_id=station_id or "",
+                camera_id=camera_id or "",
+                analysis_id=analysis_id or "",
+            )
+            if not bound_capture:
+                self._recent[capture_key] = time.monotonic()
+
+        if bound_capture:
+            self.sessions.mark_saved(str(analysis_id))
+        if bound_capture and station_id:
+            self._cleanup_evidence_steps(station_id, check.event_id)
+        if self.sync_worker is not None:
+            self.sync_worker.sync_inventory_event(check.event_id)
+        current = self.store.get_inventory_check(check.event_id) or check
+        return {
+            "ok": True,
+            "id": current.id,
+            "event_id": current.event_id,
+            "workflow": "inventory_check",
+            "analysis_id": current.analysis_id,
+            "gateway_id": current.gateway_id,
+            "station_id": current.station_id,
+            "camera_id": current.camera_id,
+            "frame_sha256": current.frame_sha256,
+            "duplicate": duplicate,
+            "product_code": current.product_code,
+            "weight": current.weight,
+            "core_weight": current.core_weight,
+            "tare_weight": current.tare_weight,
+            "unit": current.unit,
+            "sync_status": current.sync_status,
+            "remote_id": current.remote_id,
+            "remote_image_url": current.remote_image_url,
+            "remote_image_public_id": current.remote_image_public_id,
             "sync_error": current.sync_error,
             "pending_count": self.store.pending_count(),
         }
@@ -2661,6 +2844,16 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     return
                 self.send_bytes(200, "image/jpeg", image_path.read_bytes())
                 return
+            if parsed.path == "/api/inventory-image":
+                query = urllib.parse.parse_qs(parsed.query)
+                event_id = query.get("event_id", [""])[0]
+                check = store.get_inventory_check(event_id)
+                image_path = Path(check.image_path) if check is not None else None
+                if image_path is None or not image_path.is_file():
+                    self.send_json(404, {"ok": False, "error": "image_not_found"})
+                    return
+                self.send_bytes(200, "image/jpeg", image_path.read_bytes())
+                return
             if parsed.path == "/api/status":
                 identity_status = service.status()
                 self.send_json(
@@ -2879,6 +3072,53 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     },
                 )
                 return
+            if parsed.path == "/api/inventory-checks":
+                query = urllib.parse.parse_qs(parsed.query)
+                try:
+                    limit = max(1, min(int(query.get("limit", ["50"])[0]), 200))
+                except ValueError:
+                    limit = 50
+                local_items = _local_inventory_items(store, limit)
+                supabase_url = _supabase_project_url()
+                publishable_key = _supabase_read_key()
+                if not supabase_url or not publishable_key:
+                    self.send_json(
+                        200,
+                        {"ok": True, "source": "local", "items": local_items},
+                    )
+                    return
+                try:
+                    remote_items = fetch_supabase_rows(
+                        supabase_url,
+                        publishable_key,
+                        "can_kiem_kho",
+                        limit=max(limit, 200),
+                    )
+                    remote_items.sort(
+                        key=lambda item: str(item.get("captured_at", "")), reverse=True
+                    )
+                    for item in remote_items:
+                        item["sync_status"] = "synced"
+                        item["sync_error"] = None
+                    self.send_json(
+                        200,
+                        {
+                            "ok": True,
+                            "source": "supabase",
+                            "items": remote_items[:limit],
+                        },
+                    )
+                except Exception as exc:
+                    self.send_json(
+                        200,
+                        {
+                            "ok": True,
+                            "source": "local",
+                            "fallback_error": str(exc),
+                            "items": local_items,
+                        },
+                    )
+                return
             if parsed.path == "/api/lookup":
                 qr_code = urllib.parse.parse_qs(parsed.query).get("qr", [""])[0]
                 try:
@@ -2976,8 +3216,10 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     return
                 if self.path == "/api/analyze":
                     capture_kind = str(payload.get("capture_kind", "")).strip().lower()
-                    if capture_kind and capture_kind not in {"core", "product"}:
-                        raise ValueError("capture_kind phải là core hoặc product")
+                    if capture_kind and capture_kind not in {"core", "product", "inventory"}:
+                        raise ValueError(
+                            "capture_kind phải là core, product hoặc inventory"
+                        )
                     encoded_weight_frames = payload.get("weight_frames", [])
                     if not isinstance(encoded_weight_frames, list):
                         raise ValueError("weight_frames phải là danh sách")
@@ -3074,6 +3316,40 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         if product_weight_value is not None
                         else None,
                         event_id=str(payload["event_id"]) if payload.get("event_id") else None,
+                        analysis_id=str(payload["analysis_id"])
+                        if payload.get("analysis_id")
+                        else None,
+                        station_id=str(payload["station_id"])
+                        if payload.get("station_id")
+                        else None,
+                        camera_id=str(payload["camera_id"])
+                        if payload.get("camera_id")
+                        else None,
+                        frame_sha256=str(payload["frame_sha256"])
+                        if payload.get("frame_sha256")
+                        else None,
+                    )
+                    self.send_json(201, result)
+                    return
+                if self.path == "/api/inventory-capture":
+                    try:
+                        inventory_weight = float(payload.get("weight", ""))
+                        inventory_core_weight = float(payload.get("core_weight", 0))
+                        inventory_tare_weight = float(payload.get("tare_weight", 0))
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError("Số cân kiểm kho không hợp lệ") from exc
+                    result = service.capture_inventory(
+                        str(payload.get("product_code", payload.get("qr_code", ""))),
+                        inventory_weight,
+                        inventory_core_weight,
+                        inventory_tare_weight,
+                        str(payload.get("unit", "kg")),
+                        frame,
+                        bool(payload.get("vision_confirmed", False)),
+                        str(payload.get("weight_raw", "")),
+                        event_id=str(payload["event_id"])
+                        if payload.get("event_id")
+                        else None,
                         analysis_id=str(payload["analysis_id"])
                         if payload.get("analysis_id")
                         else None,

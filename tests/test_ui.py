@@ -134,6 +134,35 @@ def test_ui_save_reports_cloud_failure_but_keeps_complete_local_event(tmp_path) 
     assert Path(saved.image_path).is_file()
 
 
+def test_ui_inventory_capture_uses_one_image_without_core_capture(tmp_path) -> None:
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(store, None, None, None)
+    frame = make_qr_frame("INVENTORY-EVIDENCE")
+
+    result = service.capture_inventory(
+        "SP-KIEM-KHO-HTTP",
+        12.75,
+        0.5,
+        0.16,
+        "kg",
+        frame,
+        vision_confirmed=True,
+        weight_raw="GEMINI PRIMARY: 12.75",
+    )
+    saved = store.get_inventory_check(str(result["event_id"]))
+
+    assert result["workflow"] == "inventory_check"
+    assert result["product_code"] == "SP-KIEM-KHO-HTTP"
+    assert result["weight"] == pytest.approx(12.75)
+    assert saved is not None
+    assert saved.core_weight == pytest.approx(0.5)
+    assert saved.tare_weight == pytest.approx(0.16)
+    assert Path(saved.image_path).is_file()
+    assert store.count() == 0
+    service.close()
+    store.close()
+
+
 def test_ui_save_keeps_both_weights_and_both_images_in_one_event(tmp_path) -> None:
     store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
     service = StationUIService(store, None, None, None)
@@ -1685,7 +1714,10 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "ĐÃ CÂN LÕI · CHỜ CÂN SẢN PHẨM" in TEST_UI_HTML
     assert 'id="weight" type="number" min="0" step="0.001" placeholder="AI tự đọc" readonly' in TEST_UI_HTML
     assert 'id="productWeight" type="number" min="0" step="0.001" placeholder="AI tự đọc" readonly' in TEST_UI_HTML
-    assert TEST_UI_HTML.count('<span class="kbd">Space</span>') == 2
+    assert TEST_UI_HTML.count('<span class="kbd">Space</span>') == 3
+    assert 'id="inventoryCaptureBtn"' in TEST_UI_HTML
+    assert "capture_kind:'inventory'" in TEST_UI_HTML
+    assert "'/api/inventory-capture'" in TEST_UI_HTML
     assert "function nextCaptureKind(" in TEST_UI_HTML
     assert "captureNextWeight()" in TEST_UI_HTML
     assert "event.key==='p'" not in TEST_UI_HTML
@@ -1711,7 +1743,7 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "width:{ideal:1920}" in TEST_UI_HTML
     assert "height:{ideal:1080}" in TEST_UI_HTML
     assert "AI đọc toàn ảnh" in TEST_UI_HTML
-    assert "setInterval(loadRecords,15000)" in TEST_UI_HTML
+    assert "setInterval(()=>workflowMode==='inventory'?loadInventoryRecords():loadRecords(),15000)" in TEST_UI_HTML
     assert "appStatus.release||'local'" in TEST_UI_HTML
     assert 'id="panelModeBtn"' in TEST_UI_HTML
     assert 'id="autoDetectPanelBtn"' in TEST_UI_HTML

@@ -6,7 +6,7 @@ from pathlib import Path
 from collections.abc import Callable
 
 from .api_client import post_measurement, validate_ingest_response
-from .storage import Measurement, MeasurementStore
+from .storage import InventoryCheck, Measurement, MeasurementStore
 
 
 SendFunction = Callable[[str, dict[str, object], str, str], dict[str, object]]
@@ -99,6 +99,35 @@ class OutboxSyncWorker:
             self.store.mark_sync_failed(measurement.event_id, str(exc))
             return False
 
+    def _sync_inventory_check(self, check: InventoryCheck) -> bool:
+        try:
+            response = self.send(
+                self.api_url,
+                check.api_payload(self.device_id),
+                check.image_path,
+                self.device_token,
+            )
+            validate_ingest_response(
+                response,
+                check.event_id,
+                require_remote_image=self.require_remote_image,
+            )
+            remote_id = response.get("id")
+            remote_image_url = response.get("image_url") or response.get("core_image_url")
+            remote_image_public_id = (
+                response.get("image_public_id") or response.get("core_image_public_id")
+            )
+            self.store.mark_inventory_check_synced(
+                check.event_id,
+                int(remote_id) if remote_id is not None else None,
+                str(remote_image_url) if remote_image_url else None,
+                str(remote_image_public_id) if remote_image_public_id else None,
+            )
+            return True
+        except Exception as exc:
+            self.store.mark_inventory_check_failed(check.event_id, str(exc))
+            return False
+
     def sync_event(self, event_id: str) -> bool:
         """Synchronize one just-confirmed event before the UI reports cloud success."""
 
@@ -110,6 +139,17 @@ class OutboxSyncWorker:
                 return True
             return self._sync_measurement(measurement)
 
+    def sync_inventory_event(self, event_id: str) -> bool:
+        """Synchronize one inventory check while retaining failed rows locally."""
+
+        with self._sync_lock:
+            check = self.store.get_inventory_check(event_id)
+            if check is None:
+                return False
+            if check.sync_status == "synced":
+                return True
+            return self._sync_inventory_check(check)
+
     def sync_once(
         self,
         limit: int = 20,
@@ -119,12 +159,26 @@ class OutboxSyncWorker:
     ) -> int:
         with self._sync_lock:
             synced = 0
-            for measurement in self.store.pending(
-                limit,
-                include_deferred=include_deferred,
-                include_failed=retry_failed,
-            ):
-                if self._sync_measurement(measurement):
+            queued: list[Measurement | InventoryCheck] = [
+                *self.store.pending(
+                    limit,
+                    include_deferred=include_deferred,
+                    include_failed=retry_failed,
+                ),
+                *self.store.pending_inventory_checks(
+                    limit,
+                    include_deferred=include_deferred,
+                    include_failed=retry_failed,
+                ),
+            ]
+            queued.sort(key=lambda item: (item.captured_at, item.id))
+            for item in queued[:limit]:
+                succeeded = (
+                    self._sync_inventory_check(item)
+                    if isinstance(item, InventoryCheck)
+                    else self._sync_measurement(item)
+                )
+                if succeeded:
                     synced += 1
             return synced
 

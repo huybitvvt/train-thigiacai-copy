@@ -160,3 +160,55 @@ def test_existing_database_is_upgraded_without_losing_rows(tmp_path) -> None:
     assert len(legacy.payload_hash) == 64
     assert store.count() == 1
     store.close()
+
+
+def test_inventory_check_is_idempotent_and_keeps_one_image(tmp_path) -> None:
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    frame = np.full((64, 96, 3), 80, dtype=np.uint8)
+    kwargs = {
+        "event_id": "7d66d135-7cb0-4f24-8931-2d1c994113f1",
+        "captured_at": "2026-08-19T08:00:00.000+00:00",
+        "gateway_id": "gateway-a",
+        "station_id": "station-01",
+        "camera_id": "camera-01",
+        "analysis_id": "analysis-inventory",
+    }
+
+    first, duplicate_first = store.save_inventory_check_idempotent(
+        "SP-KIEM-KHO-001",
+        13.04,
+        0.5,
+        0.16,
+        "kg",
+        frame,
+        "camera-gemini:inventory",
+        needs_sync=True,
+        **kwargs,
+    )
+    second, duplicate_second = store.save_inventory_check_idempotent(
+        "SP-KIEM-KHO-001",
+        13.04,
+        0.5,
+        0.16,
+        "kg",
+        frame,
+        "camera-gemini:inventory",
+        needs_sync=True,
+        **kwargs,
+    )
+
+    assert duplicate_first is False
+    assert duplicate_second is True
+    assert second == first
+    assert first.product_code == "SP-KIEM-KHO-001"
+    assert first.core_weight == pytest.approx(0.5)
+    assert first.tare_weight == pytest.approx(0.16)
+    assert Path(first.image_path).is_file()
+    assert len(list((tmp_path / "captures").glob("*_inventory.jpg"))) == 1
+    assert store.inventory_pending_count() == 1
+    payload = first.api_payload()
+    assert payload["workflow"] == "inventory_check"
+    assert payload["qr_code"] == "SP-KIEM-KHO-001"
+    assert payload["product_code"] == "SP-KIEM-KHO-001"
+    assert "image_path" not in payload
+    store.close()

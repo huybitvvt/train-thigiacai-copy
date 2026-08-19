@@ -95,6 +95,49 @@ def test_outbox_accepts_core_image_ack_and_persists_it(tmp_path) -> None:
     assert saved.remote_image_public_id == "roll-captures/core-weight/event"
 
 
+def test_outbox_syncs_inventory_check_to_parallel_workflow(tmp_path) -> None:
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    check, _ = store.save_inventory_check_idempotent(
+        "SP-INVENTORY-SYNC",
+        8.25,
+        0.4,
+        0.16,
+        "kg",
+        np.zeros((40, 60, 3), dtype=np.uint8),
+        "camera-gemini:inventory",
+        needs_sync=True,
+        event_id="3b673ed9-333c-4cab-a85b-a7987c452d80",
+        gateway_id="gateway-row",
+        station_id="station-01",
+        camera_id="camera-01",
+        analysis_id="analysis-inventory",
+    )
+    sent: list[dict[str, object]] = []
+
+    def fake_send(url, payload, image_path, token):
+        sent.append(dict(payload))
+        return {
+            "ok": True,
+            "event_id": check.event_id,
+            "id": 700,
+            "image_url": "https://images.example/inventory.jpg",
+            "image_public_id": "roll-captures/inventory-check/event",
+        }
+
+    worker = OutboxSyncWorker(store, "https://example.test", "token", send=fake_send)
+    assert worker.sync_inventory_event(check.event_id) is True
+    saved = store.get_inventory_check(check.event_id)
+
+    assert saved is not None
+    assert saved.sync_status == "synced"
+    assert saved.remote_id == 700
+    assert sent[0]["workflow"] == "inventory_check"
+    assert sent[0]["product_code"] == "SP-INVENTORY-SYNC"
+    assert sent[0]["core_weight"] == pytest.approx(0.4)
+    assert sent[0]["tare_weight"] == pytest.approx(0.16)
+    store.close()
+
+
 def test_outbox_requires_product_image_ack_for_two_image_event(tmp_path) -> None:
     store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
     measurement = store.save(
