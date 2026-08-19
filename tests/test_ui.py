@@ -1716,6 +1716,14 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert 'id="productWeight" type="number" min="0" step="0.001" placeholder="AI tự đọc" readonly' in TEST_UI_HTML
     assert TEST_UI_HTML.count('<span class="kbd">Space</span>') == 3
     assert 'id="inventoryCaptureBtn"' in TEST_UI_HTML
+    assert 'class="workflow-tabs" role="tablist"' in TEST_UI_HTML
+    assert 'id="productionModeBtn" role="tab"' in TEST_UI_HTML
+    assert 'id="inventoryModeBtn" role="tab"' in TEST_UI_HTML
+    assert 'id="inventoryWeight" class="weight" type="number" min="0" step="0.001" placeholder="Auto" readonly' in TEST_UI_HTML
+    assert 'id="inventoryCoreWeight" class="weight" type="number" min="0" step="0.001" value="1"' in TEST_UI_HTML
+    assert 'id="inventoryTareWeight" class="weight" type="number" min="0" step="0.001" value="0.16"' in TEST_UI_HTML
+    assert "DEFAULT_INVENTORY_CORE_WEIGHT=1" in TEST_UI_HTML
+    assert "coreWeight:String(DEFAULT_INVENTORY_CORE_WEIGHT)" in TEST_UI_HTML
     assert "capture_kind:'inventory'" in TEST_UI_HTML
     assert "'/api/inventory-capture'" in TEST_UI_HTML
     assert "function nextCaptureKind(" in TEST_UI_HTML
