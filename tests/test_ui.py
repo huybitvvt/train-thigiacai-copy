@@ -1717,6 +1717,12 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert TEST_UI_HTML.count('<span class="kbd">Space</span>') == 3
     assert 'id="inventoryCaptureBtn"' in TEST_UI_HTML
     assert 'class="workflow-tabs" role="tablist"' in TEST_UI_HTML
+    assert "viewport-fit=cover" in TEST_UI_HTML
+    assert "@media(max-width:768px)" in TEST_UI_HTML
+    assert "source-fields{grid-template-columns:repeat(2,minmax(0,1fr))" in TEST_UI_HTML
+    assert "source-fields .apply{grid-column:1/-1" in TEST_UI_HTML
+    assert "safe-area-inset-bottom" in TEST_UI_HTML
+    assert "#productionToolbar{position:sticky" in TEST_UI_HTML
     assert 'id="productionModeBtn" role="tab"' in TEST_UI_HTML
     assert 'id="inventoryModeBtn" role="tab"' in TEST_UI_HTML
     assert 'id="inventoryWeight" class="weight" type="number" min="0" step="0.001" placeholder="Auto" readonly' in TEST_UI_HTML
