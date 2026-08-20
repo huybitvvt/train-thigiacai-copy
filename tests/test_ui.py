@@ -1260,7 +1260,11 @@ def test_ui_records_table_shows_bi_and_nvl_weights() -> None:
     assert 'id="sourceMachine"' in TEST_UI_HTML
     assert 'Máy tái chế' in TEST_UI_HTML
     assert 'Máy cách nhiệt' in TEST_UI_HTML
-    assert '<select id="sourceOrder" disabled>' in TEST_UI_HTML
+    assert 'id="sourceOrder"' in TEST_UI_HTML
+    assert 'list="sourceOrderList"' in TEST_UI_HTML
+    assert "Chọn hoặc nhập LSX" in TEST_UI_HTML
+    assert "setSourceOrderOptions" in TEST_UI_HTML
+    assert "sanitizeOrder" in TEST_UI_HTML
     assert 'placeholder="Nhập lệnh SX"' not in TEST_UI_HTML
     assert "function productionOrdersQuery(" in TEST_UI_HTML
     assert "params.set('shift'" in TEST_UI_HTML

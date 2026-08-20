@@ -630,6 +630,37 @@ def _production_order_suggestions(work_date: str) -> list[dict[str, object]]:
     return _production_order_suggestions_from_rows(rows, work_date)
 
 
+def _production_order_filter_options(
+    work_date: str = "",
+) -> tuple[list[str], list[str], list[dict[str, object]]]:
+    """Ca / máy / gợi ý lấy từ bảng LSX (DB), không hardcode."""
+    rows, _table = _master_production_order_rows()
+    if not rows:
+        return [], [], []
+    suggestions = (
+        _production_order_suggestions_from_rows(rows, work_date) if work_date else []
+    )
+    day_shifts: set[str] = set()
+    day_machines: set[str] = set()
+    all_shifts: set[str] = set()
+    all_machines: set[str] = set()
+    for row in rows:
+        shift = _production_order_shift(row).strip()
+        machine = _production_order_machine(row).strip()
+        if shift:
+            all_shifts.add(shift)
+        if machine:
+            all_machines.add(machine)
+        if work_date and _row_matches_production_filters(row, work_date=work_date):
+            if shift:
+                day_shifts.add(shift)
+            if machine:
+                day_machines.add(machine)
+    shifts = sorted(day_shifts or all_shifts, key=str.casefold)
+    machines = sorted(day_machines or all_machines, key=str.casefold)
+    return shifts, machines, suggestions
+
+
 def _production_orders_for_date(
     items: list[dict[str, object]], work_date: str
 ) -> list[str]:
@@ -3237,8 +3268,8 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     )
                     if orders:
                         source = "local"
-                suggestions = (
-                    _production_order_suggestions(work_date) if not orders or filter_relaxed else []
+                db_shifts, db_machines, suggestions = _production_order_filter_options(
+                    work_date
                 )
                 self.send_json(
                     200,
@@ -3250,6 +3281,8 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         "machine": machine or None,
                         "filter_relaxed": filter_relaxed,
                         "orders": orders,
+                        "shifts": db_shifts,
+                        "machines": db_machines,
                         "suggestions": suggestions,
                         "fallback_error": fallback_error or None,
                     },
