@@ -193,6 +193,7 @@ PRODUCTION_ORDER_TABLES = (
 PRODUCTION_ORDER_FIELDS = (
     "production_order",
     "ma_lsx",
+    "ma_lenh_sx",
     "mã lệnh",
     "ma lenh",
     "so_lsx",
@@ -200,6 +201,7 @@ PRODUCTION_ORDER_FIELDS = (
     "lenh_sx",
     "ma_lenh",
     "ten_lsx",
+    "ten_lenh_sx",
     "order_code",
     "order_no",
     "lsx",
@@ -254,12 +256,36 @@ def _production_order_product_text(row: dict[str, object]) -> str:
     return _row_field(row, PRODUCTION_ORDER_PRODUCT_FIELDS)
 
 
+def _shifts_match(row_shift: str, wanted: str) -> bool:
+    if not wanted:
+        return True
+    if not row_shift:
+        return True
+    left = _normalize_field_key(row_shift).replace(" ", "")
+    right = _normalize_field_key(wanted).replace(" ", "")
+    return left == right or left in right or right in left
+
+
+def _machine_labels_match(row_machine: str, wanted: str) -> bool:
+    if not wanted:
+        return True
+    if not row_machine:
+        return False
+    left = _normalize_field_key(row_machine)
+    right = _normalize_field_key(wanted)
+    if left == right or left in right or right in left:
+        return True
+    left_compact = left.replace(" ", "")
+    right_compact = right.replace(" ", "")
+    return left_compact == right_compact or left_compact in right_compact or right_compact in left_compact
+
+
 def _machine_matches_row(row: dict[str, object], machine: str) -> bool:
     if not machine:
         return True
     row_machine = _production_order_machine(row)
     if row_machine:
-        return row_machine == machine
+        return _machine_labels_match(row_machine, machine)
     product = _normalize_field_key(_production_order_product_text(row))
     if not product:
         return True
@@ -326,16 +352,27 @@ def _production_orders_from_supabase_tables(
     source_prefix: str = "master",
 ) -> tuple[list[str], str, str]:
     fallback_error = ""
+    queried_ok = False
+    last_table = ""
     for table in _configured_production_order_tables():
         try:
             rows = fetch_supabase_rows(supabase_url, supabase_key, table)
+            queried_ok = True
+            last_table = table
             orders = _production_orders_from_master(
                 rows, work_date, shift=shift, machine=machine
             )
             if orders:
-                return orders, f"{source_prefix}:{table}", fallback_error
+                return orders, f"{source_prefix}:{table}", ""
         except Exception as exc:
             fallback_error = fallback_error or str(exc)
+    if queried_ok:
+        detail = f"ngày {work_date}"
+        if shift:
+            detail += f", ca {shift}"
+        if machine:
+            detail += f", máy {machine}"
+        return [], f"{source_prefix}:{last_table}", f"Không có LSX cho {detail}"
     return [], source_prefix, fallback_error
 
 
@@ -519,8 +556,13 @@ def _load_production_orders_once(
         fallback_error = fallback_error or table_error
     elif supabase_url and not publishable_key and not master_key:
         fallback_error = fallback_error or (
-            "Thiếu ROLL_SCALE_PRODUCTION_ORDER_SUPABASE_SERVICE_KEY hoặc "
-            "ROLL_SCALE_SUPABASE_PUBLISHABLE_KEY trong .env"
+            "Thiếu key LSX: đặt ROLL_SCALE_PRODUCTION_ORDER_SUPABASE_URL + "
+            "ROLL_SCALE_PRODUCTION_ORDER_SUPABASE_SERVICE_KEY "
+            "(hoặc ROLL_SCALE_SUPABASE_PUBLISHABLE_KEY nếu dùng cùng project ingest)"
+        )
+    elif not master_url and not supabase_url:
+        fallback_error = fallback_error or (
+            "Thiếu ROLL_SCALE_PRODUCTION_ORDER_SUPABASE_URL trong .env / Render"
         )
     return [], "local", fallback_error
 
@@ -531,22 +573,61 @@ def _load_production_orders(
     machine: str = "",
 ) -> tuple[list[str], str, str, str | None]:
     _load_local_dotenv()
-    if _master_production_orders_configured():
-        orders, source, fallback_error = _load_production_orders_once(
-            work_date, shift=shift, machine=machine
-        )
-        return orders, source, fallback_error, None
     orders, source, fallback_error = _load_production_orders_once(
         work_date, shift=shift, machine=machine
     )
-    if orders or not machine:
+    if orders:
         return orders, source, fallback_error, None
-    relaxed_orders, relaxed_source, relaxed_error = _load_production_orders_once(
-        work_date, shift=shift, machine=""
-    )
-    if relaxed_orders:
-        return relaxed_orders, relaxed_source, relaxed_error or fallback_error, "machine"
-    return orders, source, fallback_error or relaxed_error, None
+    # Nới dần bộ lọc để vẫn hiện LSX trong ngày khi ca/máy lệch nhẹ.
+    if machine:
+        relaxed_orders, relaxed_source, relaxed_error = _load_production_orders_once(
+            work_date, shift=shift, machine=""
+        )
+        if relaxed_orders:
+            return (
+                relaxed_orders,
+                relaxed_source,
+                relaxed_error or fallback_error,
+                "machine",
+            )
+    if shift or machine:
+        day_orders, day_source, day_error = _load_production_orders_once(
+            work_date, shift="", machine=""
+        )
+        if day_orders:
+            return (
+                day_orders,
+                day_source,
+                day_error or fallback_error,
+                "shift" if shift and not machine else "shift+machine",
+            )
+    return orders, source, fallback_error, None
+
+
+def _master_production_order_rows() -> tuple[list[dict[str, object]], str]:
+    """Đọc toàn bộ dòng LSX master (để gợi ý ca/máy theo ngày)."""
+    _load_local_dotenv()
+    master_url = _production_order_supabase_url()
+    master_key = _production_order_supabase_key()
+    if not (master_url and master_key):
+        return [], ""
+    last_table = ""
+    for table in _configured_production_order_tables():
+        try:
+            rows = fetch_supabase_rows(master_url, master_key, table)
+            last_table = table
+            if rows:
+                return rows, table
+        except Exception:
+            continue
+    return [], last_table
+
+
+def _production_order_suggestions(work_date: str) -> list[dict[str, object]]:
+    rows, _table = _master_production_order_rows()
+    if not rows:
+        return []
+    return _production_order_suggestions_from_rows(rows, work_date)
 
 
 def _production_orders_for_date(
@@ -649,7 +730,7 @@ def _row_matches_production_filters(
             return False
     if shift:
         row_shift = _production_order_shift(row)
-        if row_shift and row_shift != shift:
+        if not _shifts_match(row_shift, shift):
             return False
     if machine:
         if not _machine_matches_row(row, machine):
@@ -680,6 +761,37 @@ def _production_orders_from_master(
         seen.add(key)
         unique.append(code)
     return sorted(unique, key=str.casefold)
+
+
+def _production_order_suggestions_from_rows(
+    rows: list[dict[str, object]],
+    work_date: str,
+) -> list[dict[str, object]]:
+    """Gợi ý ca · máy · LSX còn trong ngày khi bộ lọc hiện tại trống."""
+    grouped: dict[tuple[str, str], list[str]] = {}
+    for row in rows:
+        if not _row_matches_production_filters(row, work_date=work_date):
+            continue
+        code = _production_order_code(row)
+        if not code:
+            continue
+        shift = _production_order_shift(row) or "—"
+        machine = _production_order_machine(row) or "—"
+        bucket = grouped.setdefault((shift, machine), [])
+        if code not in bucket:
+            bucket.append(code)
+    suggestions: list[dict[str, object]] = []
+    for (shift, machine), orders in sorted(
+        grouped.items(), key=lambda item: (item[0][0], item[0][1])
+    ):
+        suggestions.append(
+            {
+                "shift": shift,
+                "machine": machine,
+                "orders": sorted(orders, key=str.casefold),
+            }
+        )
+    return suggestions
 
 
 def _configured_production_order_tables() -> list[str]:
@@ -3125,6 +3237,9 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     )
                     if orders:
                         source = "local"
+                suggestions = (
+                    _production_order_suggestions(work_date) if not orders or filter_relaxed else []
+                )
                 self.send_json(
                     200,
                     {
@@ -3135,6 +3250,7 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         "machine": machine or None,
                         "filter_relaxed": filter_relaxed,
                         "orders": orders,
+                        "suggestions": suggestions,
                         "fallback_error": fallback_error or None,
                     },
                 )
