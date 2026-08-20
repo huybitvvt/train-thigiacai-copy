@@ -106,11 +106,15 @@ document.getElementById('loginForm').addEventListener('submit',async event=>{
   const response=await fetch('/api/login',{method:'POST',credentials:'include',headers:{'content-type':'application/json'},body:JSON.stringify({username:document.getElementById('username').value.trim(),password:document.getElementById('password').value,next})});
   const data=await response.json();
   if(!response.ok)throw new Error(data.message||data.error||'Đăng nhập thất bại');
-  if(data.session){try{localStorage.setItem('tram_can_session',data.session)}catch{}}
+  if(data.session){
+   try{localStorage.setItem('tram_can_session',data.session)}catch{}
+   try{sessionStorage.setItem('tram_can_session',data.session)}catch{}
+   try{window.name='tram_can_session='+data.session}catch{}
+  }
   try{if(window.parent!==window&&data.session)window.parent.postMessage({source:'tram-can',type:'session',session:data.session},'*')}catch{}
   const target=new URL(data.next||'/kiem-kho',location.origin);
-  if(data.session)target.searchParams.set('session',data.session);
-  location.replace(target.pathname+target.search);
+  if(data.session){target.searchParams.set('session',data.session);target.hash='session='+encodeURIComponent(data.session)}
+  location.replace(target.pathname+target.search+target.hash);
  }catch(error){status.textContent=error.message}
 });
 </script>

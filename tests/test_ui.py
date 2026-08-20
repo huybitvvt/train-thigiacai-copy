@@ -1753,9 +1753,12 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "'/api/inventory-capture'" in TEST_UI_HTML
     assert 'id="inventoryPhoneBtn"' in TEST_UI_HTML
     assert 'capture="environment"' in TEST_UI_HTML
+    assert "function persistSessionToken(" in TEST_UI_HTML
     assert "function readSessionToken(" in TEST_UI_HTML
     assert "Authorization='Bearer '" in TEST_UI_HTML
-    assert "credentials:'include'" in TEST_UI_HTML
+    assert "X-Tram-Can-Session" in TEST_UI_HTML
+    assert "window.name='tram_can_session='" in TEST_UI_HTML
+    assert "if(!token&&!/\\/login(?:$|[?#])/.test(location.pathname))" in TEST_UI_HTML
     assert "function wantsInventoryMode(" in TEST_UI_HTML
     assert "/kiem-kho" in TEST_UI_HTML
     assert "analyzeInventory()" in TEST_UI_HTML
