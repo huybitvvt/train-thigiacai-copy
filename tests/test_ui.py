@@ -12,7 +12,14 @@ from roll_qr_scale.scale import WeightReading
 from roll_qr_scale.gemini_weight import GeminiWeightSuggestion
 from roll_qr_scale.storage import MeasurementStore
 from roll_qr_scale.sync import OutboxSyncWorker
-from roll_qr_scale.test_ui import TEST_UI_HTML, StationUIService, decode_image
+from roll_qr_scale.test_ui import (
+    TEST_UI_HTML,
+    StationUIService,
+    decode_image,
+    decode_session_cookie,
+    encode_session_cookie,
+    safe_login_next,
+)
 from roll_qr_scale.weight_ocr import NormalizedROI
 
 
@@ -1175,6 +1182,18 @@ def test_ui_rejects_invalid_weight_and_image(tmp_path) -> None:
     store.close()
 
 
+def test_session_cookie_authenticates_phone_without_basic_header() -> None:
+    expires_at = 4_000_000_000
+    cookie = encode_session_cookie("pilot", "secret", expires_at)
+    assert decode_session_cookie(cookie, "pilot", "secret")
+    assert not decode_session_cookie(cookie, "pilot", "other")
+    assert not decode_session_cookie(cookie, "other", "secret")
+    assert not decode_session_cookie(encode_session_cookie("pilot", "secret", 1), "pilot", "secret")
+    assert safe_login_next("https://evil.example/steal") == "/kiem-kho"
+    assert safe_login_next("/kiem-kho") == "/kiem-kho"
+    assert safe_login_next("/?mode=inventory") == "/?mode=inventory"
+
+
 def test_ui_has_capture_controls_without_lookup_panel() -> None:
     for control_id in (
         'id="captureFile"',
@@ -1732,6 +1751,13 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "coreWeight:String(DEFAULT_INVENTORY_CORE_WEIGHT)" in TEST_UI_HTML
     assert "capture_kind:'inventory'" in TEST_UI_HTML
     assert "'/api/inventory-capture'" in TEST_UI_HTML
+    assert 'id="inventoryPhoneBtn"' in TEST_UI_HTML
+    assert 'capture="environment"' in TEST_UI_HTML
+    assert "credentials:'include'" in TEST_UI_HTML
+    assert "function wantsInventoryMode(" in TEST_UI_HTML
+    assert "/kiem-kho" in TEST_UI_HTML
+    assert "analyzeInventory()" in TEST_UI_HTML
+    assert "session.stop();const data=await fileData(file)" in TEST_UI_HTML
     assert "function nextCaptureKind(" in TEST_UI_HTML
     assert "captureNextWeight()" in TEST_UI_HTML
     assert "event.key==='p'" not in TEST_UI_HTML

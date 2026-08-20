@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import hashlib
 import hmac
 import json
 import math
@@ -71,6 +72,96 @@ from .weight_ocr import (
 
 
 MAX_REQUEST_BYTES = 24 * 1024 * 1024
+SESSION_COOKIE_NAME = "tram_can_session"
+SESSION_TTL_SECONDS = 7 * 24 * 3600
+LOGIN_HTML = """<!doctype html>
+<html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Đăng nhập · Cân kiểm kho</title>
+<style>
+body{margin:0;font:16px/1.45 Roboto,sans-serif;background:#f1f2f4;color:#151517;padding:24px 16px calc(24px + env(safe-area-inset-bottom))}
+.card{max-width:420px;margin:12vh auto 0;background:#fff;border:1px solid #d9dadd;border-radius:14px;padding:22px;box-shadow:0 8px 28px #15151712}
+h1{margin:0 0 8px;font-size:22px}p{margin:0 0 16px;color:#666a73}
+label{display:block;font-size:12px;font-weight:700;color:#666a73;margin:10px 0 5px}
+input{width:100%;box-sizing:border-box;padding:12px 10px;border:1px solid #b8bac0;border-radius:8px;font:inherit}
+button{width:100%;margin-top:16px;min-height:48px;border:0;border-radius:8px;background:#d71920;color:#fff;font-weight:800;font-size:16px}
+.status{margin-top:12px;min-height:1.4em;color:#8d1420}
+</style></head><body>
+<form class="card" id="loginForm">
+<h1>Cân kiểm kho</h1>
+<p>Đăng nhập một lần trên điện thoại. Cookie giữ phiên 7 ngày, API không còn báo authentication_required.</p>
+<label for="username">Tên đăng nhập</label>
+<input id="username" name="username" autocomplete="username" required>
+<label for="password">Mật khẩu</label>
+<input id="password" name="password" type="password" autocomplete="current-password" required>
+<button type="submit">Vào cân kiểm kho</button>
+<div id="status" class="status"></div>
+</form>
+<script>
+const params=new URLSearchParams(location.search),next=params.get('next')||'/kiem-kho';
+document.getElementById('loginForm').addEventListener('submit',async event=>{
+ event.preventDefault();
+ const status=document.getElementById('status');
+ status.textContent='Đang đăng nhập…';
+ try{
+  const response=await fetch('/api/login',{method:'POST',credentials:'include',headers:{'content-type':'application/json'},body:JSON.stringify({username:document.getElementById('username').value,password:document.getElementById('password').value,next})});
+  const data=await response.json();
+  if(!response.ok)throw new Error(data.message||data.error||'Đăng nhập thất bại');
+  location.replace(data.next||'/kiem-kho');
+ }catch(error){status.textContent=error.message}
+});
+</script>
+</body></html>
+"""
+
+
+def _session_secret(password: str) -> bytes:
+    return hashlib.sha256(f"tram-can-session|{password}".encode("utf-8")).digest()
+
+
+def encode_session_cookie(username: str, password: str, expires_at: int) -> str:
+    payload = f"{username}|{expires_at}"
+    digest = hmac.new(_session_secret(password), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return base64.urlsafe_b64encode(f"{payload}|{digest}".encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def decode_session_cookie(value: str, username: str, password: str) -> bool:
+    if not value or not username or not password:
+        return False
+    padded = value + "=" * ((4 - len(value) % 4) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+        stored_user, expires_text, digest = decoded.split("|", 2)
+        expires_at = int(expires_text)
+    except (ValueError, UnicodeDecodeError, binascii.Error):
+        return False
+    if stored_user != username or expires_at < int(time.time()):
+        return False
+    expected = hmac.new(
+        _session_secret(password),
+        f"{stored_user}|{expires_at}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(digest, expected)
+
+
+def _secrets_match(left: str, right: str) -> bool:
+    try:
+        return hmac.compare_digest(left, right)
+    except (TypeError, ValueError):
+        return False
+
+
+def safe_login_next(value: str) -> str:
+    parsed = urllib.parse.urlparse(str(value or ""))
+    if parsed.scheme or parsed.netloc:
+        return "/kiem-kho"
+    path = parsed.path or "/kiem-kho"
+    if path not in {"/", "/kiem-kho"}:
+        return "/kiem-kho"
+    query = f"?{parsed.query}" if parsed.query else ""
+    return path + query
+
+
 MAX_BURST_FRAMES = 9
 DEFAULT_WEIGHT_BURST_FRAMES = 5
 UNITS = {"kg", "g", "lb"}
@@ -2728,7 +2819,42 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
     logo_path = Path(args.logo_image)
 
     class Handler(BaseHTTPRequestHandler):
-        def is_authorized(self) -> bool:
+        def cookie_header(self, value: str) -> str:
+            proto = str(self.headers.get("x-forwarded-proto", "")).split(",")[0].strip().lower()
+            secure = proto == "https"
+            parts = [
+                f"{SESSION_COOKIE_NAME}={value}",
+                "Path=/",
+                "HttpOnly",
+                "SameSite=Lax",
+                f"Max-Age={SESSION_TTL_SECONDS}",
+            ]
+            if secure:
+                parts.append("Secure")
+            return "; ".join(parts)
+
+        def issue_session_cookie(self) -> None:
+            if not web_username:
+                return
+            expires_at = int(time.time()) + SESSION_TTL_SECONDS
+            self.session_cookie = self.cookie_header(
+                encode_session_cookie(web_username, web_password, expires_at)
+            )
+
+        def cookie_authorized(self) -> bool:
+            if not web_username:
+                return True
+            raw = self.headers.get("cookie", "")
+            match = re.search(
+                rf"(?:^|;\s*){re.escape(SESSION_COOKIE_NAME)}=([^;]+)", raw
+            )
+            if not match:
+                return False
+            return decode_session_cookie(
+                urllib.parse.unquote(match.group(1)), web_username, web_password
+            )
+
+        def basic_authorized(self) -> bool:
             if not web_username:
                 return True
             authorization = self.headers.get("authorization", "")
@@ -2741,18 +2867,40 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                 username, password = decoded.split(":", 1)
             except (binascii.Error, UnicodeDecodeError, ValueError):
                 return False
-            return hmac.compare_digest(username, web_username) and hmac.compare_digest(
+            return _secrets_match(username, web_username) and _secrets_match(
                 password, web_password
             )
+
+        def is_authorized(self) -> bool:
+            if not web_username:
+                return True
+            if self.cookie_authorized():
+                return True
+            if self.basic_authorized():
+                self.issue_session_cookie()
+                return True
+            return False
 
         def require_authorization(self) -> bool:
             if self.is_authorized():
                 return True
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path in {"/", "/kiem-kho"}:
+                next_path = safe_login_next(parsed.path + (("?" + parsed.query) if parsed.query else ""))
+                self.send_response(302)
+                self.send_header("location", "/login?next=" + urllib.parse.quote(next_path, safe="/?="))
+                self.send_header("cache-control", "no-store")
+                self.end_headers()
+                return False
             body = json.dumps(
-                {"ok": False, "error": "authentication_required"}
+                {
+                    "ok": False,
+                    "error": "authentication_required",
+                    "message": "Đăng nhập tại /login rồi mở /kiem-kho trên điện thoại.",
+                    "login_url": "/login?next=/kiem-kho",
+                }
             ).encode("utf-8")
             self.send_response(401)
-            self.send_header("www-authenticate", 'Basic realm="Tram Can QR Pilot"')
             self.send_header("content-type", "application/json; charset=utf-8")
             self.send_header("content-length", str(len(body)))
             self.send_header("cache-control", "no-store")
@@ -2767,6 +2915,9 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
             self.send_header("content-length", str(len(body)))
             self.send_header("cache-control", "no-store")
             self.send_header("x-content-type-options", "nosniff")
+            cookie = getattr(self, "session_cookie", None)
+            if cookie:
+                self.send_header("set-cookie", cookie)
             self.end_headers()
             self.wfile.write(body)
 
@@ -2807,9 +2958,24 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     return
                 self.send_bytes(200, "font/woff2", font_path.read_bytes())
                 return
+            if parsed.path == "/login":
+                if self.is_authorized():
+                    next_path = safe_login_next(
+                        urllib.parse.parse_qs(parsed.query).get("next", ["/kiem-kho"])[0]
+                    )
+                    self.send_response(302)
+                    self.send_header("location", next_path)
+                    cookie = getattr(self, "session_cookie", None)
+                    if cookie:
+                        self.send_header("set-cookie", cookie)
+                    self.send_header("cache-control", "no-store")
+                    self.end_headers()
+                    return
+                self.send_bytes(200, "text/html; charset=utf-8", LOGIN_HTML.encode("utf-8"))
+                return
             if not self.require_authorization():
                 return
-            if parsed.path == "/":
+            if parsed.path in {"/", "/kiem-kho"}:
                 self.send_bytes(200, "text/html; charset=utf-8", load_frontend_html().encode("utf-8"))
                 return
             if parsed.path == "/demo.jpg":
@@ -3145,6 +3311,36 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
             self.send_json(404, {"ok": False, "error": "not_found"})
 
         def do_POST(self) -> None:
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path == "/api/login":
+                try:
+                    payload = self.read_json()
+                    username = str(payload.get("username", ""))
+                    password = str(payload.get("password", ""))
+                    if not web_username:
+                        self.send_json(200, {"ok": True, "next": safe_login_next(str(payload.get("next", "")))})
+                        return
+                    if not (
+                        _secrets_match(username, web_username)
+                        and _secrets_match(password, web_password)
+                    ):
+                        self.send_json(
+                            401,
+                            {
+                                "ok": False,
+                                "error": "authentication_required",
+                                "message": "Sai tên đăng nhập hoặc mật khẩu",
+                            },
+                        )
+                        return
+                    self.issue_session_cookie()
+                    self.send_json(
+                        200,
+                        {"ok": True, "next": safe_login_next(str(payload.get("next", "")))},
+                    )
+                except ValueError as exc:
+                    self.send_json(400, {"ok": False, "error": "invalid_input", "message": str(exc)})
+                return
             if not self.require_authorization():
                 return
             try:
