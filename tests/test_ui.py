@@ -1753,7 +1753,11 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "'/api/inventory-capture'" in TEST_UI_HTML
     assert 'id="inventoryPhoneBtn"' in TEST_UI_HTML
     assert 'capture="environment"' in TEST_UI_HTML
-    assert "function persistSessionToken(" in TEST_UI_HTML
+    assert "function applyWorkflowLayout(" in TEST_UI_HTML
+    assert "function wantsInventoryMode(" in TEST_UI_HTML
+    assert "window.parent!==window" in TEST_UI_HTML
+    assert "applyWorkflowLayout(workflowMode)" in TEST_UI_HTML
+    assert "session.eventId&&!wantsInventoryMode()" in TEST_UI_HTML
     assert "function readSessionToken(" in TEST_UI_HTML
     assert "Authorization='Bearer '" in TEST_UI_HTML
     assert "X-Tram-Can-Session" in TEST_UI_HTML
