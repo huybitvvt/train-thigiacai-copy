@@ -1196,8 +1196,6 @@ def test_session_cookie_authenticates_phone_without_basic_header() -> None:
 
 def test_ui_has_capture_controls_without_lookup_panel() -> None:
     for control_id in (
-        'id="captureFile"',
-        'id="captureFileBtn"',
         'id="analyzeCoreBtn"',
         'id="analyzeProductBtn"',
         'id="roiBox"',
@@ -1210,6 +1208,8 @@ def test_ui_has_capture_controls_without_lookup_panel() -> None:
     ):
         assert control_id in TEST_UI_HTML
     for removed_control in (
+        'id="captureFile"',
+        'id="captureFileBtn"',
         'id="lookupQr"',
         'id="lookupFile"',
         'id="lookupCameraBtn"',
@@ -1752,7 +1752,9 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "capture_kind:'inventory'" in TEST_UI_HTML
     assert "'/api/inventory-capture'" in TEST_UI_HTML
     assert 'id="inventoryPhoneBtn"' in TEST_UI_HTML
-    assert 'capture="environment"' in TEST_UI_HTML
+    assert '>Chụp ảnh</button>' in TEST_UI_HTML
+    assert "function captureInventoryPhoto(" in TEST_UI_HTML
+    assert "bindActionButton('inventoryPhoneBtn',()=>captureInventoryPhoto())" in TEST_UI_HTML
     assert "function applyWorkflowLayout(" in TEST_UI_HTML
     assert "function wantsInventoryMode(" in TEST_UI_HTML
     assert "window.parent!==window" in TEST_UI_HTML
@@ -1766,7 +1768,7 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "function wantsInventoryMode(" in TEST_UI_HTML
     assert "/kiem-kho" in TEST_UI_HTML
     assert "analyzeInventory()" in TEST_UI_HTML
-    assert "session.stop();const data=await fileData(file)" in TEST_UI_HTML
+    assert "function captureInventoryPhoto(" in TEST_UI_HTML
     assert "function nextCaptureKind(" in TEST_UI_HTML
     assert "captureNextWeight()" in TEST_UI_HTML
     assert "event.key==='p'" not in TEST_UI_HTML
@@ -1775,13 +1777,14 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "function showPostCaptureSource(session,next=nextCaptureStep(session))" in TEST_UI_HTML
     assert "session.preview.onload=null;if(session.stream){showVideo(session);return}" in TEST_UI_HTML
     assert "session.preview.removeAttribute('src')" in TEST_UI_HTML
-    assert "session.placeholder.textContent='Chọn ảnh mới cho '+nextStillCaptureLabel(next)" in TEST_UI_HTML
+    assert "session.placeholder.textContent='Mở camera để chụp '+nextStillCaptureLabel(next)" in TEST_UI_HTML
     assert "function advanceToNextCapture(session)" in TEST_UI_HTML
     assert "const next=nextCaptureStep(session);if(next)session.selectedSlot=next" in TEST_UI_HTML
     assert "const next=advanceToNextCapture(session);" in TEST_UI_HTML
     assert "scrollIntoView({behavior:'smooth',block:'nearest'})" in TEST_UI_HTML
-    assert "Ảnh cũ đã khóa. Bấm Chọn ảnh" in TEST_UI_HTML
-    assert "event.target.value='';loadCaptureFile(file)" in TEST_UI_HTML
+    assert "Ảnh cũ đã khóa. Bấm Mở camera" in TEST_UI_HTML
+    assert "bindActionButton('inventoryPhoneBtn',()=>captureInventoryPhoto())" in TEST_UI_HTML
+    assert "$('captureFileBtn').onclick=()=>$('captureFile').click();$('captureFile').onchange=event=>{const file=event.target.files[0];event.target.value='';loadCaptureFile(file)}" not in TEST_UI_HTML
     assert "session.selectedSlot={kind:'core',round:0};ensureRounds(session)" in TEST_UI_HTML
     assert "showCapturedBlank" not in TEST_UI_HTML
     assert "function cameraVideoConstraints()" in TEST_UI_HTML
