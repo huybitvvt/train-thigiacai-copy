@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import threading
 import urllib.error
 import urllib.request
@@ -106,17 +107,30 @@ def test_web_auth_protects_ui_but_leaves_health_check_public(
             method="POST",
         )
         with urllib.request.urlopen(login, timeout=2) as response:
-            payload = response.read().decode("utf-8")
-            assert '"ok": true' in payload or '"ok":true' in payload
+            payload = json.loads(response.read().decode("utf-8"))
+            assert payload["ok"] is True
+            session_value = payload["session"]
+            assert session_value
             cookie_header = response.headers.get("Set-Cookie", "")
-        session_value = cookie_header.split("tram_can_session=", 1)[1].split(";", 1)[0]
+            assert "tram_can_session=" in cookie_header
         cookie_request = urllib.request.Request(
             f"{base_url}/api/status",
             headers={"Cookie": f"tram_can_session={session_value}"},
         )
         with urllib.request.urlopen(cookie_request, timeout=2) as response:
             assert response.status == 200
+        bearer_request = urllib.request.Request(
+            f"{base_url}/api/status",
+            headers={"Authorization": f"Bearer {session_value}"},
+        )
+        with urllib.request.urlopen(bearer_request, timeout=2) as response:
+            assert response.status == 200
 
+        with urllib.request.urlopen(f"{base_url}/kiem-kho", timeout=2) as response:
+            assert response.status == 200
+            page = response.read().decode("utf-8")
+            assert 'id="inventoryPhoneBtn"' in page
+            assert "frame-ancestors" in (response.headers.get("Content-Security-Policy") or "")
         with urllib.request.urlopen(f"{base_url}/login", timeout=2) as response:
             assert response.status == 200
             assert "Cân kiểm kho" in response.read().decode("utf-8")

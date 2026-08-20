@@ -88,7 +88,7 @@ button{width:100%;margin-top:16px;min-height:48px;border:0;border-radius:8px;bac
 </style></head><body>
 <form class="card" id="loginForm">
 <h1>Cân kiểm kho</h1>
-<p>Đăng nhập một lần trên điện thoại. Cookie giữ phiên 7 ngày, API không còn báo authentication_required.</p>
+<p>Dùng được khi web khác nhúng (iframe). Đăng nhập xong giữ phiên trong trang nhúng, không cần cookie bên thứ ba.</p>
 <label for="username">Tên đăng nhập</label>
 <input id="username" name="username" autocomplete="username" required>
 <label for="password">Mật khẩu</label>
@@ -103,10 +103,14 @@ document.getElementById('loginForm').addEventListener('submit',async event=>{
  const status=document.getElementById('status');
  status.textContent='Đang đăng nhập…';
  try{
-  const response=await fetch('/api/login',{method:'POST',credentials:'include',headers:{'content-type':'application/json'},body:JSON.stringify({username:document.getElementById('username').value,password:document.getElementById('password').value,next})});
+  const response=await fetch('/api/login',{method:'POST',credentials:'include',headers:{'content-type':'application/json'},body:JSON.stringify({username:document.getElementById('username').value.trim(),password:document.getElementById('password').value,next})});
   const data=await response.json();
   if(!response.ok)throw new Error(data.message||data.error||'Đăng nhập thất bại');
-  location.replace(data.next||'/kiem-kho');
+  if(data.session){try{localStorage.setItem('tram_can_session',data.session)}catch{}}
+  try{if(window.parent!==window&&data.session)window.parent.postMessage({source:'tram-can',type:'session',session:data.session},'*')}catch{}
+  const target=new URL(data.next||'/kiem-kho',location.origin);
+  if(data.session)target.searchParams.set('session',data.session);
+  location.replace(target.pathname+target.search);
  }catch(error){status.textContent=error.message}
 });
 </script>
@@ -160,6 +164,11 @@ def safe_login_next(value: str) -> str:
         return "/kiem-kho"
     query = f"?{parsed.query}" if parsed.query else ""
     return path + query
+
+
+def allowed_embed_origins() -> list[str]:
+    raw = os.environ.get("ROLL_SCALE_EMBED_ORIGINS", "*").strip() or "*"
+    return [item.strip() for item in raw.split(",") if item.strip()]
 
 
 MAX_BURST_FRAMES = 9
@@ -2698,7 +2707,7 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
     if bool(args.lookup_url) != bool(args.lookup_token):
         raise ValueError("Cần đủ URL và token của API tra cứu")
     web_username = os.environ.get("ROLL_SCALE_WEB_USERNAME", "").strip()
-    web_password = os.environ.get("ROLL_SCALE_WEB_PASSWORD", "")
+    web_password = os.environ.get("ROLL_SCALE_WEB_PASSWORD", "").strip()
     if bool(web_username) != bool(web_password):
         raise ValueError("Cần đủ ROLL_SCALE_WEB_USERNAME và ROLL_SCALE_WEB_PASSWORD")
     station_ids = getattr(args, "station_ids", None)
@@ -2819,40 +2828,87 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
     logo_path = Path(args.logo_image)
 
     class Handler(BaseHTTPRequestHandler):
-        def cookie_header(self, value: str) -> str:
+        def is_https(self) -> bool:
             proto = str(self.headers.get("x-forwarded-proto", "")).split(",")[0].strip().lower()
-            secure = proto == "https"
+            if proto == "https":
+                return True
+            return str(self.headers.get("origin", "")).startswith("https://")
+
+        def cookie_header(self, value: str) -> str:
             parts = [
                 f"{SESSION_COOKIE_NAME}={value}",
                 "Path=/",
                 "HttpOnly",
-                "SameSite=Lax",
                 f"Max-Age={SESSION_TTL_SECONDS}",
             ]
-            if secure:
-                parts.append("Secure")
+            if self.is_https():
+                parts.extend(["Secure", "SameSite=None"])
+            else:
+                parts.append("SameSite=Lax")
             return "; ".join(parts)
 
-        def issue_session_cookie(self) -> None:
-            if not web_username:
-                return
-            expires_at = int(time.time()) + SESSION_TTL_SECONDS
-            self.session_cookie = self.cookie_header(
-                encode_session_cookie(web_username, web_password, expires_at)
+        def add_embed_headers(self) -> None:
+            origins = allowed_embed_origins()
+            origin = str(self.headers.get("origin", "")).strip()
+            if "*" in origins:
+                ancestors = "*"
+                if origin:
+                    self.send_header("access-control-allow-origin", origin)
+                    self.send_header("access-control-allow-credentials", "true")
+                    self.send_header("vary", "Origin")
+                else:
+                    self.send_header("access-control-allow-origin", "*")
+            elif origin in origins:
+                ancestors = " ".join(origins)
+                self.send_header("access-control-allow-origin", origin)
+                self.send_header("access-control-allow-credentials", "true")
+                self.send_header("vary", "Origin")
+            else:
+                ancestors = " ".join(origins) if origins else "'none'"
+            self.send_header("content-security-policy", f"frame-ancestors {ancestors}")
+            self.send_header(
+                "access-control-allow-headers",
+                "Authorization, Content-Type, X-Tram-Can-Session",
             )
+            self.send_header("access-control-allow-methods", "GET, POST, OPTIONS")
 
-        def cookie_authorized(self) -> bool:
+        def issue_session_cookie(self) -> str:
             if not web_username:
-                return True
+                return ""
+            expires_at = int(time.time()) + SESSION_TTL_SECONDS
+            token = encode_session_cookie(web_username, web_password, expires_at)
+            self.session_token = token
+            self.session_cookie = self.cookie_header(token)
+            return token
+
+        def apply_session_token(self, token: str) -> bool:
+            token = urllib.parse.unquote(str(token or "").strip())
+            if not decode_session_cookie(token, web_username, web_password):
+                return False
+            self.session_token = token
+            self.session_cookie = self.cookie_header(token)
+            return True
+
+        def request_session_token(self) -> str:
+            authorization = self.headers.get("authorization", "")
+            if authorization.lower().startswith("bearer "):
+                return authorization[7:].strip()
+            header = self.headers.get("x-tram-can-session", "").strip()
+            if header:
+                return header
             raw = self.headers.get("cookie", "")
             match = re.search(
                 rf"(?:^|;\s*){re.escape(SESSION_COOKIE_NAME)}=([^;]+)", raw
             )
-            if not match:
-                return False
-            return decode_session_cookie(
-                urllib.parse.unquote(match.group(1)), web_username, web_password
-            )
+            if match:
+                return urllib.parse.unquote(match.group(1).strip())
+            return ""
+
+        def cookie_authorized(self) -> bool:
+            if not web_username:
+                return True
+            token = self.request_session_token()
+            return bool(token) and self.apply_session_token(token)
 
         def basic_authorized(self) -> bool:
             if not web_username:
@@ -2884,30 +2940,23 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
         def require_authorization(self) -> bool:
             if self.is_authorized():
                 return True
-            parsed = urllib.parse.urlparse(self.path)
-            if parsed.path in {"/", "/kiem-kho"}:
-                next_path = safe_login_next(parsed.path + (("?" + parsed.query) if parsed.query else ""))
-                self.send_response(302)
-                self.send_header("location", "/login?next=" + urllib.parse.quote(next_path, safe="/?="))
-                self.send_header("cache-control", "no-store")
-                self.end_headers()
-                return False
-            body = json.dumps(
+            self.send_json(
+                401,
                 {
                     "ok": False,
                     "error": "authentication_required",
-                    "message": "Đăng nhập tại /login rồi mở /kiem-kho trên điện thoại.",
+                    "message": "Đăng nhập tại /login rồi mở /kiem-kho. Nếu web khác nhúng, iframe cần allow-same-origin allow-scripts allow-forms.",
                     "login_url": "/login?next=/kiem-kho",
-                }
-            ).encode("utf-8")
-            self.send_response(401)
-            self.send_header("content-type", "application/json; charset=utf-8")
-            self.send_header("content-length", str(len(body)))
-            self.send_header("cache-control", "no-store")
-            self.send_header("x-content-type-options", "nosniff")
-            self.end_headers()
-            self.wfile.write(body)
+                },
+            )
             return False
+
+        def do_OPTIONS(self) -> None:
+            self.send_response(204)
+            self.add_embed_headers()
+            self.send_header("content-length", "0")
+            self.send_header("cache-control", "no-store")
+            self.end_headers()
 
         def send_bytes(self, status_code: int, content_type: str, body: bytes) -> None:
             self.send_response(status_code)
@@ -2915,6 +2964,7 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
             self.send_header("content-length", str(len(body)))
             self.send_header("cache-control", "no-store")
             self.send_header("x-content-type-options", "nosniff")
+            self.add_embed_headers()
             cookie = getattr(self, "session_cookie", None)
             if cookie:
                 self.send_header("set-cookie", cookie)
@@ -2959,23 +3009,13 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                 self.send_bytes(200, "font/woff2", font_path.read_bytes())
                 return
             if parsed.path == "/login":
-                if self.is_authorized():
-                    next_path = safe_login_next(
-                        urllib.parse.parse_qs(parsed.query).get("next", ["/kiem-kho"])[0]
-                    )
-                    self.send_response(302)
-                    self.send_header("location", next_path)
-                    cookie = getattr(self, "session_cookie", None)
-                    if cookie:
-                        self.send_header("set-cookie", cookie)
-                    self.send_header("cache-control", "no-store")
-                    self.end_headers()
-                    return
                 self.send_bytes(200, "text/html; charset=utf-8", LOGIN_HTML.encode("utf-8"))
                 return
-            if not self.require_authorization():
-                return
             if parsed.path in {"/", "/kiem-kho"}:
+                query = urllib.parse.parse_qs(parsed.query)
+                token = str((query.get("session") or [""])[0]).strip()
+                if token:
+                    self.apply_session_token(token)
                 self.send_bytes(200, "text/html; charset=utf-8", load_frontend_html().encode("utf-8"))
                 return
             if parsed.path == "/demo.jpg":
@@ -2991,6 +3031,8 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     return
                 content_type = "image/png" if logo_path.suffix.lower() == ".png" else "image/jpeg"
                 self.send_bytes(200, content_type, logo_path.read_bytes())
+                return
+            if not self.require_authorization():
                 return
             if parsed.path == "/api/measurement-image":
                 query = urllib.parse.parse_qs(parsed.query)
@@ -3315,11 +3357,11 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
             if parsed.path == "/api/login":
                 try:
                     payload = self.read_json()
-                    username = str(payload.get("username", ""))
-                    password = str(payload.get("password", ""))
                     if not web_username:
-                        self.send_json(200, {"ok": True, "next": safe_login_next(str(payload.get("next", "")))})
+                        self.send_json(200, {"ok": True, "session": "", "next": safe_login_next(str(payload.get("next", "")))})
                         return
+                    username = str(payload.get("username", "")).strip()
+                    password = str(payload.get("password", "")).strip()
                     if not (
                         _secrets_match(username, web_username)
                         and _secrets_match(password, web_password)
@@ -3333,10 +3375,14 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                             },
                         )
                         return
-                    self.issue_session_cookie()
+                    token = self.issue_session_cookie()
                     self.send_json(
                         200,
-                        {"ok": True, "next": safe_login_next(str(payload.get("next", "")))},
+                        {
+                            "ok": True,
+                            "session": token,
+                            "next": safe_login_next(str(payload.get("next", ""))),
+                        },
                     )
                 except ValueError as exc:
                     self.send_json(400, {"ok": False, "error": "invalid_input", "message": str(exc)})
