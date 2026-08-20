@@ -1993,7 +1993,7 @@ def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
         "scheduleReconnect(session,session.deviceId)",
         "this.hydratedPending=Boolean(config.event_id)",
         "function pollPendingSessions()",
-        "Chọn camera hoặc ảnh thực tế, rồi chụp cân lõi / cân sản phẩm.",
+            "Mở camera rồi chụp cân lõi / cân sản phẩm.",
         "session.deviceId&&!session.hasUnsavedReview()",
         "weight_frames:weightFrames",
         "captureWeightBurst(session)",
@@ -2136,6 +2136,80 @@ def test_bound_capture_is_idempotent_and_keeps_analysis_id(tmp_path, monkeypatch
     assert not Path(str(staged_core["image_path"])).exists()
     assert not Path(str(staged_product["image_path"])).exists()
     assert not Path(str(staged_product["metadata_path"])).exists()
+
+
+def test_bound_capture_survives_service_restart_before_product_save(
+    tmp_path, monkeypatch
+) -> None:
+    class FakeOCRSource:
+        def __init__(self, *args, reader=None, **kwargs):
+            self._reader = reader or object()
+
+        def capture(self, frame):
+            return WeightReading(20.15, "kg", True, "OCR: 20.15@0.96", 0.96)
+
+    monkeypatch.setattr(test_ui_module, "CameraOCRWeightSource", FakeOCRSource)
+    database = tmp_path / "measurements.db"
+    captures = tmp_path / "captures"
+    frame = make_qr_frame("ROLL-RESTART-001")
+    event_id = str(uuid.uuid4())
+
+    first_store = MeasurementStore(database, captures)
+    first_service = StationUIService(
+        first_store,
+        None,
+        None,
+        None,
+        gateway_id="gateway-test",
+        station_count=1,
+        station_ids=["station-01"],
+        camera_ids=["camera-01"],
+    )
+    analysis = first_service.analyze(
+        frame,
+        "0.4,0.7,0.6,0.9",
+        "kg",
+        event_id=event_id,
+        station_id="station-01",
+        camera_id="camera-01",
+    )
+    first_service.close()
+    first_store.close()
+
+    restarted_store = MeasurementStore(database, captures)
+    restarted_service = StationUIService(
+        restarted_store,
+        None,
+        None,
+        None,
+        gateway_id="gateway-test",
+        station_count=1,
+        station_ids=["station-01"],
+        camera_ids=["camera-01"],
+    )
+    result = restarted_service.capture(
+        "ROLL-RESTART-001",
+        20.15,
+        "kg",
+        frame,
+        True,
+        "OCR",
+        product_frame=frame,
+        product_weight=21.15,
+        event_id=event_id,
+        analysis_id=str(analysis["analysis_id"]),
+        station_id="station-01",
+        camera_id="camera-01",
+        frame_sha256=str(analysis["frame_sha256"]),
+    )
+    row = restarted_store.get(event_id)
+    restarted_service.close()
+    restarted_store.close()
+
+    assert result["ok"] is True
+    assert result["event_id"] == event_id
+    assert result["analysis_id"] == analysis["analysis_id"]
+    assert row is not None and row.product_weight == 21.15
 
 
 def test_discard_session_removes_transient_step_evidence(tmp_path) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import threading
@@ -15,6 +16,8 @@ import numpy as np
 
 
 _IDENTITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_ACTIVE_STATES = frozenset({"analyzing", "ready", "error"})
 
 
 class StationSessionError(ValueError):
@@ -146,6 +149,8 @@ class StationSessionRegistry:
         self._sessions = {value: StationSession(value) for value in normalized}
         self._bindings: dict[str, AnalysisBinding] = {}
         self._lock = threading.RLock()
+        self._state_path = self.staging_dir / ".active-bindings.json"
+        self._restore_persisted_bindings()
 
     @property
     def station_ids(self) -> tuple[str, ...]:
@@ -225,6 +230,7 @@ class StationSessionRegistry:
                 session.configured_camera_id = camera_id
             session.state = "analyzing"
             session.last_error = ""
+            self._persist_active_bindings_locked()
             return binding
 
     begin_analysis = stage
@@ -280,6 +286,7 @@ class StationSessionRegistry:
             session.last_error = ""
             if not session.configured_camera_id:
                 session.configured_camera_id = camera_id
+            self._persist_active_bindings_locked()
             return restored
 
     def mark_ready(self, analysis_id: str) -> AnalysisBinding:
@@ -367,6 +374,7 @@ class StationSessionRegistry:
             session.current_analysis_id = None
             session.state = "idle"
             session.last_error = ""
+            self._persist_active_bindings_locked()
             return True
 
     def binding(self, analysis_id: str) -> AnalysisBinding | None:
@@ -403,7 +411,111 @@ class StationSessionRegistry:
             with session._lock:
                 if session.current_analysis_id == binding.analysis_id:
                     session.state = state
+            self._persist_active_bindings_locked()
             return updated
+
+    def _restore_persisted_bindings(self) -> None:
+        """Restore unsaved bindings after a process restart.
+
+        The JPEG hash remains the trust boundary. Invalid or incomplete entries
+        are ignored so one damaged session cannot prevent the service starting.
+        """
+
+        try:
+            payload = json.loads(self._state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        items = payload.get("bindings") if isinstance(payload, dict) else None
+        if not isinstance(items, list):
+            return
+        staging_root = self.staging_dir.resolve()
+        with self._lock:
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    analysis_id = _identity(str(item["analysis_id"]), "analysis_id")
+                    event_id = _identity(str(item["event_id"]), "event_id")
+                    station_id = _identity(str(item["station_id"]), "station_id")
+                    camera_id = _identity(str(item["camera_id"]), "camera_id")
+                    frame_sha256 = str(item["frame_sha256"]).strip().lower()
+                    captured_at = str(item["captured_at"]).strip()
+                    created_at = float(item["created_at"])
+                    state = str(item["state"]).strip()
+                    staged_path = (staging_root / str(item["staged_file"])).resolve()
+                    staged_path.relative_to(staging_root)
+                except (KeyError, TypeError, ValueError, StationSessionError):
+                    continue
+                if (
+                    station_id not in self._sessions
+                    or state not in _ACTIVE_STATES
+                    or not _SHA256_RE.fullmatch(frame_sha256)
+                    or not captured_at
+                    or not staged_path.is_file()
+                ):
+                    continue
+                try:
+                    if jpeg_sha256(staged_path.read_bytes()) != frame_sha256:
+                        continue
+                except OSError:
+                    continue
+                session = self._sessions[station_id]
+                if session.current_analysis_id is not None or analysis_id in self._bindings:
+                    continue
+                binding = AnalysisBinding(
+                    analysis_id=analysis_id,
+                    event_id=event_id,
+                    station_id=station_id,
+                    camera_id=camera_id,
+                    frame_sha256=frame_sha256,
+                    staged_path=staged_path,
+                    captured_at=captured_at,
+                    created_at=created_at,
+                    state=state,
+                )
+                self._bindings[analysis_id] = binding
+                session.current_analysis_id = analysis_id
+                session.state = state
+
+    def _persist_active_bindings_locked(self) -> None:
+        staging_root = self.staging_dir.resolve()
+        bindings: list[dict[str, object]] = []
+        for session in self._sessions.values():
+            binding = self._bindings.get(session.current_analysis_id or "")
+            if binding is None or binding.state not in _ACTIVE_STATES:
+                continue
+            try:
+                staged_file = binding.staged_path.resolve().relative_to(staging_root).as_posix()
+            except ValueError as exc:
+                raise StationSessionError("Ảnh staging nằm ngoài thư mục an toàn") from exc
+            bindings.append(
+                {
+                    "analysis_id": binding.analysis_id,
+                    "event_id": binding.event_id,
+                    "station_id": binding.station_id,
+                    "camera_id": binding.camera_id,
+                    "frame_sha256": binding.frame_sha256,
+                    "staged_file": staged_file,
+                    "captured_at": binding.captured_at,
+                    "created_at": binding.created_at,
+                    "state": binding.state,
+                }
+            )
+        temporary_path = self._state_path.with_suffix(".tmp")
+        try:
+            with temporary_path.open("w", encoding="utf-8") as persisted:
+                json.dump(
+                    {"version": 1, "bindings": bindings},
+                    persisted,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                persisted.flush()
+                os.fsync(persisted.fileno())
+            temporary_path.replace(self._state_path)
+        finally:
+            if temporary_path.exists():
+                temporary_path.unlink()
 
     @staticmethod
     def _require_match(
