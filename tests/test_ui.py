@@ -1781,6 +1781,13 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "session.selectedSlot={kind:'core',round:0};ensureRounds(session)" in TEST_UI_HTML
     assert "showCapturedBlank" not in TEST_UI_HTML
     assert "function cameraVideoConstraints()" in TEST_UI_HTML
+    assert "facingMode:{ideal:'environment'}" in TEST_UI_HTML
+    assert "function prefersDirectMobileCamera()" in TEST_UI_HTML
+    assert "function openPrimaryCamera()" in TEST_UI_HTML
+    assert "bindActionButton('openDefaultCamBtn',()=>openPrimaryCamera())" in TEST_UI_HTML
+    assert '<meta name="theme-color" content="#0d0d0f">' in TEST_UI_HTML
+    assert '@media(hover:none)' in TEST_UI_HTML
+    assert 'id="captureQr" autocomplete="off" autofocus' not in TEST_UI_HTML
     assert "function tuneCameraTrack(track)" in TEST_UI_HTML
     assert "initialCameraPermissionCheck&&stations.some(session=>session.deviceId)" in TEST_UI_HTML
     assert "function decodeClientQr(canvas)" in TEST_UI_HTML
