@@ -1090,6 +1090,11 @@ def decode_image(value: str) -> np.ndarray:
     return frame
 
 
+def _blank_evidence_frame() -> np.ndarray:
+    """Tiny placeholder used when a weigh slip is saved without camera photos."""
+    return np.full((48, 48, 3), 32, dtype=np.uint8)
+
+
 class StationUIService:
     def __init__(
         self,
@@ -2323,9 +2328,12 @@ class StationUIService:
         station_id: str | None = None,
         camera_id: str | None = None,
         frame_sha256: str | None = None,
+        allow_missing_image: bool = False,
     ) -> dict[str, object]:
         qr_code = qr_code.strip()
         if not qr_code:
+            if allow_missing_image:
+                raise ValueError("Chưa có mã SP")
             decoded = self.decode_qr(frame)
             if not decoded.get("found"):
                 raise ValueError("Chưa có QR; hãy quét mã hoặc đưa QR vào camera")
@@ -2339,16 +2347,22 @@ class StationUIService:
             raise ValueError("Đơn vị không hợp lệ")
         if not math.isfinite(weight) or weight < 0:
             raise ValueError("Số cân phải là số không âm")
-        quality = self.assess_quality(frame)
-        quality_payload, quality_pass = self.quality_result(quality)
-        if not quality_pass:
-            raise ValueError(
-                "Ảnh chưa đạt chất lượng: "
-                + "; ".join(str(issue) for issue in quality_payload["issues"])
-            )
+        if not allow_missing_image:
+            quality = self.assess_quality(frame)
+            quality_payload, quality_pass = self.quality_result(quality)
+            if not quality_pass:
+                raise ValueError(
+                    "Ảnh chưa đạt chất lượng: "
+                    + "; ".join(str(issue) for issue in quality_payload["issues"])
+                )
 
         identity_values = (event_id, analysis_id, station_id, camera_id)
         bound_capture = any(identity_values) or bool(frame_sha256)
+        if allow_missing_image:
+            bound_capture = False
+            event_id = event_id or str(uuid.uuid4())
+            analysis_id = None
+            frame_sha256 = None
         if bound_capture and not all(identity_values):
             raise ValueError("Cần đủ event_id, analysis_id, station_id và camera_id")
         computed_frame_sha = jpeg_sha256(encode_staged_jpeg(frame))
@@ -2388,7 +2402,7 @@ class StationUIService:
 
         with self._lock:
             capture_key = frame_fingerprint(frame)
-            if not bound_capture:
+            if not bound_capture and not allow_missing_image:
                 now = time.monotonic()
                 if now - self._recent.get(capture_key, float("-inf")) < self.duplicate_window:
                     raise ValueError("Ảnh này vừa được lưu; hãy chụp khung hình mới")
@@ -2398,7 +2412,9 @@ class StationUIService:
                 unit=unit,
                 frame=frame,
                 weight_source=(
-                    "camera-gemini:test-ui"
+                    "manual-no-image"
+                    if allow_missing_image
+                    else "camera-gemini:test-ui"
                     if vision_confirmed and "GEMINI" in weight_raw
                     else "camera-ocr:test-ui"
                     if vision_confirmed
@@ -2409,7 +2425,7 @@ class StationUIService:
                 weight_raw=_persistable_weight_raw(
                     weight_raw,
                     weight=weight,
-                    vision_confirmed=vision_confirmed,
+                    vision_confirmed=vision_confirmed and not allow_missing_image,
                 ),
                 weight_stable=True,
                 event_id=event_id,
@@ -2419,14 +2435,14 @@ class StationUIService:
                 camera_id=camera_id or "",
                 analysis_id=analysis_id or "",
             )
-            if not bound_capture:
+            if not bound_capture and not allow_missing_image:
                 self._recent[capture_key] = time.monotonic()
 
         if bound_capture:
             self.sessions.mark_saved(str(analysis_id))
         if product_weight is not None:
             self.store.attach_product_weight(measurement.event_id, product_weight)
-        if product_frame is not None:
+        if product_frame is not None and not allow_missing_image:
             self.store.attach_product_image(measurement.event_id, product_frame)
             measurement = self.store.get(measurement.event_id) or measurement
         if bound_capture and station_id:
@@ -3633,7 +3649,7 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         },
                     )
                     return
-                if self.path == "/api/sync-retry":
+                if parsed.path == "/api/sync-retry":
                     result = _retry_sync_payload(
                         service,
                         event_id=str(payload.get("event_id", "") or ""),
@@ -3641,6 +3657,66 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         all_failed=bool(payload.get("all_failed", False)),
                     )
                     self.send_json(200, result)
+                    return
+                if parsed.path == "/api/capture":
+                    try:
+                        weight = float(payload.get("weight", ""))
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError("Số cân không hợp lệ") from exc
+                    weight_raw = _merge_source_tags(str(payload.get("weight_raw", "")), payload)
+                    if not _raw_tag(weight_raw, "SOURCE_PRODUCTION_ORDER"):
+                        raise ValueError("Thiếu Lệnh sản xuất")
+                    image_value = str(payload.get("image", "") or "").strip()
+                    product_image_value = str(payload.get("product_image", "") or "").strip()
+                    allow_missing_image = not bool(image_value)
+                    frame = (
+                        decode_image(image_value)
+                        if image_value
+                        else _blank_evidence_frame()
+                    )
+                    product_frame = (
+                        decode_image(product_image_value) if product_image_value else None
+                    )
+                    product_weight_value = payload.get("product_weight")
+                    if product_weight_value is None:
+                        product_match = re.search(
+                            r"(?:^|; )PRODUCT_WEIGHT=([0-9]+(?:\.[0-9]+)?)",
+                            weight_raw,
+                        )
+                        product_weight_value = product_match.group(1) if product_match else None
+                    if allow_missing_image and "IMAGE_SOURCE=NONE" not in weight_raw:
+                        weight_raw = (
+                            f"{weight_raw}; IMAGE_SOURCE=NONE"
+                            if weight_raw
+                            else "IMAGE_SOURCE=NONE"
+                        )
+                    result = service.capture(
+                        str(payload.get("qr_code", "")),
+                        weight,
+                        str(payload.get("unit", "kg")),
+                        frame,
+                        bool(payload.get("vision_confirmed", False)),
+                        weight_raw,
+                        product_frame=product_frame,
+                        product_weight=float(product_weight_value)
+                        if product_weight_value is not None
+                        else None,
+                        event_id=str(payload["event_id"]) if payload.get("event_id") else None,
+                        analysis_id=str(payload["analysis_id"])
+                        if payload.get("analysis_id")
+                        else None,
+                        station_id=str(payload["station_id"])
+                        if payload.get("station_id")
+                        else None,
+                        camera_id=str(payload["camera_id"])
+                        if payload.get("camera_id")
+                        else None,
+                        frame_sha256=str(payload["frame_sha256"])
+                        if payload.get("frame_sha256")
+                        else None,
+                        allow_missing_image=allow_missing_image,
+                    )
+                    self.send_json(201, result)
                     return
                 frame = decode_image(str(payload.get("image", "")))
                 if self.path == "/api/panel/detect":
@@ -3748,48 +3824,6 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         frame,
                         str(payload.get("qr_roi", "")),
                         metadata,
-                    )
-                    self.send_json(201, result)
-                    return
-                if self.path == "/api/capture":
-                    try:
-                        weight = float(payload.get("weight", ""))
-                    except (TypeError, ValueError) as exc:
-                        raise ValueError("Số cân không hợp lệ") from exc
-                    weight_raw = _merge_source_tags(str(payload.get("weight_raw", "")), payload)
-                    if not _raw_tag(weight_raw, "SOURCE_PRODUCTION_ORDER"):
-                        raise ValueError("Thiếu Lệnh sản xuất")
-                    product_weight_value = payload.get("product_weight")
-                    if product_weight_value is None:
-                        product_match = re.search(
-                            r"(?:^|; )PRODUCT_WEIGHT=([0-9]+(?:\.[0-9]+)?)",
-                            weight_raw,
-                        )
-                        product_weight_value = product_match.group(1) if product_match else None
-                    result = service.capture(
-                        str(payload.get("qr_code", "")),
-                        weight,
-                        str(payload.get("unit", "kg")),
-                        frame,
-                        bool(payload.get("vision_confirmed", False)),
-                        weight_raw,
-                        product_frame=product_frame,
-                        product_weight=float(product_weight_value)
-                        if product_weight_value is not None
-                        else None,
-                        event_id=str(payload["event_id"]) if payload.get("event_id") else None,
-                        analysis_id=str(payload["analysis_id"])
-                        if payload.get("analysis_id")
-                        else None,
-                        station_id=str(payload["station_id"])
-                        if payload.get("station_id")
-                        else None,
-                        camera_id=str(payload["camera_id"])
-                        if payload.get("camera_id")
-                        else None,
-                        frame_sha256=str(payload["frame_sha256"])
-                        if payload.get("frame_sha256")
-                        else None,
                     )
                     self.send_json(201, result)
                     return

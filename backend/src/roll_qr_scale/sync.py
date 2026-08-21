@@ -71,6 +71,7 @@ class OutboxSyncWorker:
                 payload["product_image_base64"] = base64.b64encode(
                     Path(measurement.product_image_path).read_bytes()
                 ).decode("ascii")
+            no_image = "IMAGE_SOURCE=NONE" in str(measurement.weight_raw or "")
             response = self.send(
                 self.api_url,
                 payload,
@@ -80,8 +81,8 @@ class OutboxSyncWorker:
             validate_ingest_response(
                 response,
                 measurement.event_id,
-                require_remote_image=self.require_remote_image,
-                require_product_image=bool(measurement.product_image_path),
+                require_remote_image=self.require_remote_image and not no_image,
+                require_product_image=bool(measurement.product_image_path) and not no_image,
             )
             remote_id = response.get("id")
             remote_image_url = response.get("core_image_url") or response.get("image_url")
