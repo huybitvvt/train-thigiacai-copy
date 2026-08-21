@@ -3690,14 +3690,18 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         if not isinstance(encoded_frame, str):
                             raise ValueError("Burst chứa ảnh không hợp lệ")
                         weight_frames.append(decode_image(encoded_frame))
-                    bind_core = capture_kind != "product"
+                    # Core binds by default. Product may also bind when the UI
+                    # skips core weighing and uses a fixed default core weight.
+                    bind_session = capture_kind != "product" or bool(
+                        payload.get("bind_session", False)
+                    )
                     result = service.analyze(
                         frame,
                         str(payload.get("roi", "")),
                         str(payload.get("unit", "kg")),
-                        event_id=str(payload["event_id"]) if bind_core and payload.get("event_id") else None,
-                        station_id=str(payload["station_id"]) if bind_core and payload.get("station_id") else None,
-                        camera_id=str(payload["camera_id"]) if bind_core and payload.get("camera_id") else None,
+                        event_id=str(payload["event_id"]) if bind_session and payload.get("event_id") else None,
+                        station_id=str(payload["station_id"]) if bind_session and payload.get("station_id") else None,
+                        camera_id=str(payload["camera_id"]) if bind_session and payload.get("camera_id") else None,
                         weight_frames=weight_frames,
                         require_temporal=bool(payload.get("camera_capture", False)),
                         recognition_profile=str(payload.get("recognition_profile", "fast")),
