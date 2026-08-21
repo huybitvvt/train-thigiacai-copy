@@ -1010,6 +1010,60 @@ def _local_inventory_items(
     return items
 
 
+def _retry_sync_payload(
+    service: "StationUIService",
+    *,
+    event_id: str = "",
+    workflow: str = "auto",
+    all_failed: bool = False,
+) -> dict[str, object]:
+    """Retry one outbox row or flush deferred/failed syncs immediately."""
+
+    if service.sync_worker is None:
+        raise ValueError("Chưa cấu hình đồng bộ Supabase trên máy này")
+    event_id = str(event_id or "").strip()
+    workflow = str(workflow or "auto").strip().lower()
+    if all_failed or not event_id:
+        synced = service.sync_worker.sync_once(
+            limit=100,
+            include_deferred=True,
+            retry_failed=True,
+        )
+        return {
+            "ok": True,
+            "mode": "batch",
+            "synced": synced,
+            "message": f"Đã đồng bộ lại {synced} bản ghi",
+        }
+
+    inventory = service.store.get_inventory_check(event_id)
+    measurement = service.store.get(event_id)
+    use_inventory = workflow == "inventory" or (
+        workflow == "auto" and inventory is not None and measurement is None
+    )
+    if use_inventory:
+        if inventory is None:
+            raise ValueError("Không tìm thấy bản ghi Cân kiểm kho local để đồng bộ lại")
+        ok = service.sync_worker.sync_inventory_event(event_id)
+        latest = service.store.get_inventory_check(event_id)
+    else:
+        if measurement is None:
+            raise ValueError("Không tìm thấy lần cân local để đồng bộ lại")
+        ok = service.sync_worker.sync_event(event_id)
+        latest = service.store.get(event_id)
+    status = latest.sync_status if latest is not None else ("synced" if ok else "failed")
+    error = latest.sync_error if latest is not None else None
+    return {
+        "ok": ok,
+        "mode": "single",
+        "workflow": "inventory" if use_inventory else "measurement",
+        "event_id": event_id,
+        "sync_status": status,
+        "sync_error": error,
+        "message": "Đã đồng bộ Supabase" if ok else (error or "Đồng bộ thất bại"),
+    }
+
+
 def _env_flag(name: str, default: bool = False) -> bool:
     value = os.environ.get(name)
     if value is None:
@@ -3578,6 +3632,15 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                             ),
                         },
                     )
+                    return
+                if self.path == "/api/sync-retry":
+                    result = _retry_sync_payload(
+                        service,
+                        event_id=str(payload.get("event_id", "") or ""),
+                        workflow=str(payload.get("workflow", "auto") or "auto"),
+                        all_failed=bool(payload.get("all_failed", False)),
+                    )
+                    self.send_json(200, result)
                     return
                 frame = decode_image(str(payload.get("image", "")))
                 if self.path == "/api/panel/detect":
