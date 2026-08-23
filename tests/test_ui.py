@@ -1726,7 +1726,7 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "if(isProduct&&!coreReady(session))" in TEST_UI_HTML
     assert "session._analyzeLock=false;renderControls();status(captureStatus,error.message" in TEST_UI_HTML
     assert "await api('/api/session/discard'" in TEST_UI_HTML
-    assert "if(!isProduct&&session.coreAnalysis&&session.analysisId)" in TEST_UI_HTML
+    assert "if(!isProduct&&session.analysisId)" in TEST_UI_HTML
     assert 'id="analyzeCoreBtn"' in TEST_UI_HTML
     assert 'id="analyzeProductBtn"' in TEST_UI_HTML
     assert 'id="productWeight"' in TEST_UI_HTML
@@ -1734,9 +1734,9 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "analyzeCurrent('product')" in TEST_UI_HTML
     assert "PRODUCT_WEIGHT=" in TEST_UI_HTML
     assert "function productReady(session)" in TEST_UI_HTML
-    assert "ĐÃ CÂN LÕI · CHỜ CÂN SẢN PHẨM" in TEST_UI_HTML
-    assert 'id="weight" type="number" min="0" step="0.001" placeholder="AI tự đọc" readonly' in TEST_UI_HTML
-    assert 'id="productWeight" type="number" min="0" step="0.001" placeholder="AI tự đọc" readonly' in TEST_UI_HTML
+    assert "LÕI '+session.weight+' · CHỜ CÂN SẢN PHẨM" in TEST_UI_HTML
+    assert 'id="weight" type="number" min="0" step="0.001" value="1.02" placeholder="1.02"' in TEST_UI_HTML
+    assert 'id="productWeight" type="number" min="0" step="0.001" placeholder="Nhập hoặc AI đọc"' in TEST_UI_HTML
     assert TEST_UI_HTML.count('<span class="kbd">Space</span>') == 3
     assert 'id="inventoryCaptureBtn"' in TEST_UI_HTML
     assert 'class="workflow-tabs" role="tablist"' in TEST_UI_HTML
@@ -1789,7 +1789,7 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "Ảnh cũ đã khóa. Bấm Mở camera" in TEST_UI_HTML
     assert "bindActionButton('inventoryPhoneBtn',()=>captureInventoryPhoto())" in TEST_UI_HTML
     assert "$('captureFileBtn').onclick=()=>$('captureFile').click();$('captureFile').onchange=event=>{const file=event.target.files[0];event.target.value='';loadCaptureFile(file)}" not in TEST_UI_HTML
-    assert "session.selectedSlot={kind:'core',round:0};ensureRounds(session)" in TEST_UI_HTML
+    assert "session.selectedSlot={kind:'product',round:0};ensureRounds(session)" in TEST_UI_HTML
     assert "showCapturedBlank" not in TEST_UI_HTML
     assert "function cameraVideoConstraints()" in TEST_UI_HTML
     assert "facingMode:{ideal:'environment'}" in TEST_UI_HTML
@@ -1873,7 +1873,7 @@ def test_ui_weighs_multiple_rounds_with_split_second_table() -> None:
     assert "ROUND2_CORE=" in TEST_UI_HTML
     assert "evidence-round split" in TEST_UI_HTML
     assert "evidence-round split" in TEST_UI_HTML
-    assert "if(!isProduct&&session.coreAnalysis&&session.analysisId)" in TEST_UI_HTML
+    assert "if(!isProduct&&session.analysisId)" in TEST_UI_HTML
     assert "if(targetRound===0)" in TEST_UI_HTML
     assert "capture_kind:targetRound>0?'product':kind" in TEST_UI_HTML
     assert "$('addRoundBtn').addEventListener('click'" in TEST_UI_HTML
@@ -1984,7 +1984,7 @@ def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
         "function completionReady(session)",
         "function sourceReady(session)",
         "function productReady(session)",
-        "ĐÃ CÂN LÕI · CHỜ CÂN SẢN PHẨM",
+        "LÕI '+session.weight+' · CHỜ CÂN SẢN PHẨM",
         'id="analyzeCoreBtn"',
         'id="analyzeProductBtn"',
         'id="productWeight"',
@@ -2001,6 +2001,10 @@ def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
         "session.deviceId&&!session.hasUnsavedReview()",
         "weight_frames:weightFrames",
         "captureWeightBurst(session)",
+        "capture_round:targetRound",
+        "function thumbnailFromSessionCanvas(session)",
+        "product_image_same_as_image:productOnly",
+        "function setCapturedPreview(session,image)",
         "function isTextEditingTarget(target)",
         "function discardSlot(",
         "function discardRound(",
@@ -2249,6 +2253,53 @@ def test_discard_session_removes_transient_step_evidence(tmp_path) -> None:
     store.close()
     assert not Path(str(staged["image_path"])).exists()
     assert not Path(str(staged["metadata_path"])).exists()
+
+
+def test_multiple_product_photos_use_distinct_staging_files(tmp_path) -> None:
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(
+        store,
+        None,
+        None,
+        None,
+        station_count=1,
+        station_ids=["station-01"],
+        camera_ids=["camera-01"],
+    )
+    event_id = str(uuid.uuid4())
+    first_frame = make_qr_frame("ROLL-MULTI-001")
+    second_frame = make_qr_frame("ROLL-MULTI-002")
+
+    first = service.stage_evidence_step(
+        first_frame,
+        event_id=event_id,
+        station_id="station-01",
+        kind="product",
+        weight=10.1,
+        unit="kg",
+        step_index=1,
+    )
+    second = service.stage_evidence_step(
+        second_frame,
+        event_id=event_id,
+        station_id="station-01",
+        kind="product",
+        weight=10.2,
+        unit="kg",
+        step_index=2,
+    )
+
+    first_path = Path(str(first["image_path"]))
+    second_path = Path(str(second["image_path"]))
+    assert first_path != second_path
+    assert first_path.is_file() and second_path.is_file()
+    assert first_path.read_bytes() != second_path.read_bytes()
+
+    service._cleanup_evidence_steps("station-01", event_id)
+    service.close()
+    store.close()
+    assert not first_path.exists()
+    assert not second_path.exists()
 
 
 def test_service_rejects_duplicate_logical_camera_ids(tmp_path) -> None:

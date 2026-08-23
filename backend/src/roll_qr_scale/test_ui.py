@@ -1569,16 +1569,20 @@ class StationUIService:
         weight: float,
         unit: str,
         qr_code: str = "",
+        step_index: int | None = None,
     ) -> dict[str, object]:
         """Durably save each accepted weighing step before final confirmation."""
         if kind not in {"core", "product", "inventory"}:
             raise ValueError("capture_kind phải là core, product hoặc inventory")
         if station_id not in {str(item["station_id"]) for item in self.station_configs}:
             raise ValueError("station_id không hợp lệ")
+        if step_index is not None and not 1 <= int(step_index) <= 24:
+            raise ValueError("Thứ tự ảnh cân không hợp lệ")
         uuid.UUID(event_id)
         folder = self.sessions.staging_dir / station_id
         folder.mkdir(parents=True, exist_ok=True)
-        image_path = folder / f"{event_id}_{kind}.jpg"
+        step_suffix = f"_{int(step_index)}" if step_index is not None else ""
+        image_path = folder / f"{event_id}_{kind}{step_suffix}.jpg"
         metadata_path = folder / f"{event_id}_steps.json"
         encoded_ok, encoded = cv2.imencode(".jpg", frame)
         if not encoded_ok:
@@ -1593,11 +1597,12 @@ class StationUIService:
                         metadata.update(loaded)
                 except (OSError, json.JSONDecodeError):
                     pass
-            metadata[kind] = {
+            metadata[f"{kind}{step_suffix}"] = {
                 "image_path": str(image_path.resolve()),
                 "weight": float(weight),
                 "unit": unit,
                 "qr_code": qr_code.strip(),
+                "step_index": int(step_index) if step_index is not None else None,
             }
             metadata_path.write_text(
                 json.dumps(metadata, ensure_ascii=False, indent=2),
@@ -1780,9 +1785,13 @@ class StationUIService:
         except (ValueError, TypeError, AttributeError):
             return
         folder = self.sessions.staging_dir / station_id
-        for suffix in ("_core.jpg", "_product.jpg", "_inventory.jpg", "_steps.json"):
+        paths = [folder / f"{event_id}_steps.json"]
+        for kind in ("core", "product", "inventory"):
+            paths.append(folder / f"{event_id}_{kind}.jpg")
+            paths.extend(folder.glob(f"{event_id}_{kind}_[0-9]*.jpg"))
+        for path in paths:
             try:
-                (folder / f"{event_id}{suffix}").unlink(missing_ok=True)
+                path.unlink(missing_ok=True)
             except OSError:
                 pass
 
@@ -3677,6 +3686,10 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     product_frame = (
                         decode_image(product_image_value) if product_image_value else None
                     )
+                    if payload.get("product_image_same_as_image") is True:
+                        if not image_value:
+                            raise ValueError("Thiếu ảnh sản phẩm dùng chung")
+                        product_frame = frame.copy()
                     product_weight_value = payload.get("product_weight")
                     if product_weight_value is None:
                         product_match = re.search(
@@ -3804,6 +3817,11 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                             weight=float(result["weight"]),
                             unit=str(result.get("unit", payload.get("unit", "kg"))),
                             qr_code=str(result.get("qr_code", "")),
+                            step_index=(
+                                int(payload.get("capture_round", 0)) + 1
+                                if payload.get("capture_round") is not None
+                                else None
+                            ),
                         )
                         result["step_saved"] = True
                         result["step_image_path"] = staged["image_path"]
