@@ -2,6 +2,7 @@ import base64
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -177,6 +178,124 @@ def test_outbox_requires_product_image_ack_for_two_image_event(tmp_path) -> None
     ]
     assert saved is not None
     assert saved.sync_status == "synced"
+    assert saved.remote_product_image_url == "https://images.example/product.jpg"
+    assert (
+        saved.remote_product_image_public_id
+        == "roll-captures/product-weight/event"
+    )
+    store.close()
+
+
+def test_reconcile_cloud_images_then_cleanup_old_local_evidence(tmp_path) -> None:
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    measurement = store.save(
+        "ROLL-CLOUD-CLEANUP-001",
+        1.02,
+        "kg",
+        np.zeros((40, 60, 3), dtype=np.uint8),
+        "camera-gemini:test-ui",
+        needs_sync=True,
+        captured_at="2026-01-01T00:00:00+00:00",
+    )
+    store.attach_product_weight(measurement.event_id, 13.04)
+    store.attach_product_image(
+        measurement.event_id,
+        np.full((50, 70, 3), 220, dtype=np.uint8),
+    )
+    measurement = store.get(measurement.event_id)
+    assert measurement is not None
+
+    def fake_send(*args):
+        return {
+            "ok": True,
+            "event_id": measurement.event_id,
+            "id": 333,
+            "core_image_url": "https://images.example/core-cleanup.jpg",
+            "core_image_public_id": "roll-captures/core-cleanup",
+            "product_image_url": "https://images.example/product-cleanup.jpg",
+            "product_image_public_id": "roll-captures/product-cleanup",
+        }
+
+    checked: list[str] = []
+
+    def remote_check(url: str) -> bool:
+        checked.append(url)
+        return True
+
+    worker = OutboxSyncWorker(
+        store,
+        "https://example.test",
+        "token",
+        send=fake_send,
+        remote_check=remote_check,
+        retention_days=7,
+    )
+    assert worker.sync_once() == 1
+    assert worker.reconcile_once() == 1
+    verified = store.get(measurement.event_id)
+    assert verified is not None
+    assert verified.cloud_verified_at
+    assert verified.cloud_check_error is None
+    assert checked == [
+        "https://images.example/core-cleanup.jpg",
+        "https://images.example/product-cleanup.jpg",
+    ]
+
+    cleanup = store.cleanup_verified_local_images(
+        7,
+        now=datetime(2026, 8, 23, tzinfo=timezone.utc),
+    )
+    cleaned = store.get(measurement.event_id)
+    assert cleanup["rows"] == 1
+    assert cleanup["files"] == 2
+    assert cleaned is not None and cleaned.local_images_deleted_at
+    assert not Path(measurement.image_path).exists()
+    assert not Path(measurement.product_image_path).exists()
+    assert cleaned.remote_image_url == "https://images.example/core-cleanup.jpg"
+    assert cleaned.remote_product_image_url == "https://images.example/product-cleanup.jpg"
+    store.close()
+
+
+def test_failed_cloud_reconciliation_warns_and_keeps_local_images(tmp_path) -> None:
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    measurement = store.save(
+        "ROLL-CLOUD-WARN-001",
+        2.0,
+        "kg",
+        np.zeros((30, 30, 3), dtype=np.uint8),
+        "camera-gemini:test-ui",
+        needs_sync=True,
+        captured_at="2026-01-01T00:00:00+00:00",
+    )
+
+    def fake_send(*args):
+        return {
+            "ok": True,
+            "event_id": measurement.event_id,
+            "id": 444,
+            "core_image_url": "https://images.example/missing.jpg",
+            "core_image_public_id": "roll-captures/missing",
+        }
+
+    worker = OutboxSyncWorker(
+        store,
+        "https://example.test",
+        "token",
+        send=fake_send,
+        remote_check=lambda url: False,
+    )
+    assert worker.sync_once() == 1
+    assert worker.reconcile_once() == 0
+    warned = store.get(measurement.event_id)
+    assert warned is not None
+    assert warned.sync_status == "synced"
+    assert "không tải được" in str(warned.cloud_check_error)
+    assert store.integrity_summary()["cloud_error"] == 1
+    assert store.cleanup_verified_local_images(
+        0,
+        now=datetime(2026, 8, 23, tzinfo=timezone.utc),
+    )["rows"] == 0
+    assert Path(measurement.image_path).is_file()
     store.close()
 
 

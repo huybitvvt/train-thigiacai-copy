@@ -141,6 +141,42 @@ def test_ui_save_reports_cloud_failure_but_keeps_complete_local_event(tmp_path) 
     assert Path(saved.image_path).is_file()
 
 
+def test_ui_retry_with_fixed_unbound_event_id_does_not_duplicate(tmp_path) -> None:
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(store, None, None, None)
+    event_id = str(uuid.uuid4())
+    frame = make_qr_frame("FIXED-ROUND-EVIDENCE")
+
+    first = service.capture(
+        "FIXED-ROUND-001",
+        1.02,
+        "kg",
+        frame,
+        weight_raw="PRODUCT_WEIGHT=13.04",
+        product_frame=frame.copy(),
+        product_weight=13.04,
+        event_id=event_id,
+    )
+    second = service.capture(
+        "FIXED-ROUND-001",
+        1.02,
+        "kg",
+        frame,
+        weight_raw="PRODUCT_WEIGHT=13.04",
+        product_frame=frame.copy(),
+        product_weight=13.04,
+        event_id=event_id,
+    )
+
+    assert first["event_id"] == event_id
+    assert second["event_id"] == event_id
+    assert first["duplicate"] is False
+    assert second["duplicate"] is True
+    assert store.count() == 1
+    service.close()
+    store.close()
+
+
 def test_ui_inventory_capture_uses_one_image_without_core_capture(tmp_path) -> None:
     store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
     service = StationUIService(store, None, None, None)
@@ -1811,7 +1847,7 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "width:{ideal:1920}" in TEST_UI_HTML
     assert "height:{ideal:1080}" in TEST_UI_HTML
     assert "AI đọc toàn ảnh" in TEST_UI_HTML
-    assert "setInterval(()=>workflowMode==='inventory'?loadInventoryRecords():loadRecords(),15000)" in TEST_UI_HTML
+    assert "setInterval(()=>{if(workflowMode==='inventory')loadInventoryRecords();else loadRecords();refreshSyncHealth()},15000)" in TEST_UI_HTML
     assert "appStatus.release||'local'" in TEST_UI_HTML
     assert 'id="panelModeBtn"' in TEST_UI_HTML
     assert 'id="autoDetectPanelBtn"' in TEST_UI_HTML
@@ -1876,6 +1912,8 @@ def test_ui_weighs_multiple_rounds_with_split_second_table() -> None:
     assert "if(!isProduct&&session.analysisId)" in TEST_UI_HTML
     assert "if(targetRound===0)" in TEST_UI_HTML
     assert "capture_kind:targetRound>0?'product':kind" in TEST_UI_HTML
+    assert "syncedAll||(lastData&&lastData.sync_status==='synced')" not in TEST_UI_HTML
+    assert "round.eventId=round.eventId||newEventId()" in TEST_UI_HTML
     assert "$('addRoundBtn').addEventListener('click'" in TEST_UI_HTML
     assert 'id="captureQr2"' in TEST_UI_HTML
     assert "Mã nhập SP lần 1" in TEST_UI_HTML
@@ -2005,6 +2043,10 @@ def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
         "function thumbnailFromSessionCanvas(session)",
         "product_image_same_as_image:productOnly",
         "function setCapturedPreview(session,image)",
+        "eventId:newEventId()",
+        "event_id:round.eventId",
+        "results.every(data=>data&&data.sync_status==='synced')",
+        "cloud_issue_count",
         "function isTextEditingTarget(target)",
         "function discardSlot(",
         "function discardRound(",

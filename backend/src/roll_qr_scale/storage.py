@@ -33,6 +33,11 @@ class Measurement:
     remote_id: int | None = None
     remote_image_url: str | None = None
     remote_image_public_id: str | None = None
+    remote_product_image_url: str | None = None
+    remote_product_image_public_id: str | None = None
+    cloud_verified_at: str | None = None
+    cloud_check_error: str | None = None
+    local_images_deleted_at: str | None = None
     weight_raw: str = ""
     weight_stable: bool = True
     gateway_id: str = ""
@@ -52,6 +57,11 @@ class Measurement:
             "remote_id",
             "remote_image_url",
             "remote_image_public_id",
+            "remote_product_image_url",
+            "remote_product_image_public_id",
+            "cloud_verified_at",
+            "cloud_check_error",
+            "local_images_deleted_at",
             "image_path",
             "product_image_path",
         ):
@@ -99,6 +109,9 @@ class InventoryCheck:
     remote_id: int | None = None
     remote_image_url: str | None = None
     remote_image_public_id: str | None = None
+    cloud_verified_at: str | None = None
+    cloud_check_error: str | None = None
+    local_images_deleted_at: str | None = None
     weight_raw: str = ""
     weight_stable: bool = True
     gateway_id: str = ""
@@ -118,6 +131,9 @@ class InventoryCheck:
             "remote_id",
             "remote_image_url",
             "remote_image_public_id",
+            "cloud_verified_at",
+            "cloud_check_error",
+            "local_images_deleted_at",
             "image_path",
         ):
             payload.pop(local_field)
@@ -204,6 +220,11 @@ class MeasurementStore:
                 remote_id INTEGER,
                 remote_image_url TEXT,
                 remote_image_public_id TEXT,
+                remote_product_image_url TEXT,
+                remote_product_image_public_id TEXT,
+                cloud_verified_at TEXT,
+                cloud_check_error TEXT,
+                local_images_deleted_at TEXT,
                 weight_raw TEXT NOT NULL DEFAULT '',
                 weight_stable INTEGER NOT NULL DEFAULT 1,
                 gateway_id TEXT NOT NULL DEFAULT '',
@@ -238,6 +259,9 @@ class MeasurementStore:
                 remote_id INTEGER,
                 remote_image_url TEXT,
                 remote_image_public_id TEXT,
+                cloud_verified_at TEXT,
+                cloud_check_error TEXT,
+                local_images_deleted_at TEXT,
                 weight_raw TEXT NOT NULL DEFAULT '',
                 weight_stable INTEGER NOT NULL DEFAULT 1,
                 gateway_id TEXT NOT NULL DEFAULT '',
@@ -288,6 +312,11 @@ class MeasurementStore:
             "remote_id": "INTEGER",
             "remote_image_url": "TEXT",
             "remote_image_public_id": "TEXT",
+            "remote_product_image_url": "TEXT",
+            "remote_product_image_public_id": "TEXT",
+            "cloud_verified_at": "TEXT",
+            "cloud_check_error": "TEXT",
+            "local_images_deleted_at": "TEXT",
             "weight_raw": "TEXT NOT NULL DEFAULT ''",
             "weight_stable": "INTEGER NOT NULL DEFAULT 1",
             "qr_source": "TEXT NOT NULL DEFAULT 'camera'",
@@ -305,6 +334,23 @@ class MeasurementStore:
             if column not in existing:
                 self.connection.execute(
                     f"ALTER TABLE measurements ADD COLUMN {column} {definition}"
+                )
+
+        inventory_existing = {
+            str(row["name"])
+            for row in self.connection.execute(
+                "PRAGMA table_info(inventory_checks)"
+            ).fetchall()
+        }
+        inventory_additions = {
+            "cloud_verified_at": "TEXT",
+            "cloud_check_error": "TEXT",
+            "local_images_deleted_at": "TEXT",
+        }
+        for column, definition in inventory_additions.items():
+            if column not in inventory_existing:
+                self.connection.execute(
+                    f"ALTER TABLE inventory_checks ADD COLUMN {column} {definition}"
                 )
 
         # Backfill structured product weight from captures made before the
@@ -642,6 +688,31 @@ class MeasurementStore:
                 if row["remote_image_public_id"] is not None
                 else None
             ),
+            remote_product_image_url=(
+                str(row["remote_product_image_url"])
+                if row["remote_product_image_url"] is not None
+                else None
+            ),
+            remote_product_image_public_id=(
+                str(row["remote_product_image_public_id"])
+                if row["remote_product_image_public_id"] is not None
+                else None
+            ),
+            cloud_verified_at=(
+                str(row["cloud_verified_at"])
+                if row["cloud_verified_at"] is not None
+                else None
+            ),
+            cloud_check_error=(
+                str(row["cloud_check_error"])
+                if row["cloud_check_error"] is not None
+                else None
+            ),
+            local_images_deleted_at=(
+                str(row["local_images_deleted_at"])
+                if row["local_images_deleted_at"] is not None
+                else None
+            ),
             weight_raw=str(row["weight_raw"]),
             weight_stable=bool(row["weight_stable"]),
             gateway_id=str(row["gateway_id"]),
@@ -728,6 +799,8 @@ class MeasurementStore:
         remote_id: int | None = None,
         remote_image_url: str | None = None,
         remote_image_public_id: str | None = None,
+        remote_product_image_url: str | None = None,
+        remote_product_image_public_id: str | None = None,
     ) -> None:
         now = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
         with self._lock:
@@ -736,7 +809,10 @@ class MeasurementStore:
                 UPDATE measurements
                 SET sync_status = 'synced', sync_error = NULL, next_retry_at = NULL,
                     last_attempt_at = ?, synced_at = ?, remote_id = ?,
-                    remote_image_url = ?, remote_image_public_id = ?
+                    remote_image_url = ?, remote_image_public_id = ?,
+                    remote_product_image_url = ?,
+                    remote_product_image_public_id = ?,
+                    cloud_verified_at = NULL, cloud_check_error = NULL
                 WHERE event_id = ?
                 """,
                 (
@@ -745,6 +821,8 @@ class MeasurementStore:
                     remote_id,
                     remote_image_url,
                     remote_image_public_id,
+                    remote_product_image_url,
+                    remote_product_image_public_id,
                     event_id,
                 ),
             )
@@ -941,6 +1019,21 @@ class MeasurementStore:
                 if row["remote_image_public_id"] is not None
                 else None
             ),
+            cloud_verified_at=(
+                str(row["cloud_verified_at"])
+                if row["cloud_verified_at"] is not None
+                else None
+            ),
+            cloud_check_error=(
+                str(row["cloud_check_error"])
+                if row["cloud_check_error"] is not None
+                else None
+            ),
+            local_images_deleted_at=(
+                str(row["local_images_deleted_at"])
+                if row["local_images_deleted_at"] is not None
+                else None
+            ),
             weight_raw=str(row["weight_raw"]),
             weight_stable=bool(row["weight_stable"]),
             gateway_id=str(row["gateway_id"]),
@@ -1004,7 +1097,8 @@ class MeasurementStore:
                 UPDATE inventory_checks
                 SET sync_status = 'synced', sync_error = NULL, next_retry_at = NULL,
                     last_attempt_at = ?, synced_at = ?, remote_id = ?,
-                    remote_image_url = ?, remote_image_public_id = ?
+                    remote_image_url = ?, remote_image_public_id = ?,
+                    cloud_verified_at = NULL, cloud_check_error = NULL
                 WHERE event_id = ?
                 """,
                 (now, now, remote_id, remote_image_url, remote_image_public_id, event_id),
@@ -1038,6 +1132,205 @@ class MeasurementStore:
                 ),
             )
             self.connection.commit()
+
+    def reconciliation_candidates(
+        self,
+        limit: int = 50,
+        *,
+        recheck_after_hours: float = 24.0,
+    ) -> list[Measurement]:
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(hours=max(0.0, recheck_after_hours))
+        ).isoformat(timespec="milliseconds")
+        with self._lock:
+            rows = self.connection.execute(
+                """
+                SELECT * FROM measurements
+                WHERE sync_status = 'synced' AND remote_id IS NOT NULL
+                  AND (cloud_verified_at IS NULL OR cloud_verified_at <= ?)
+                ORDER BY COALESCE(cloud_verified_at, captured_at), id
+                LIMIT ?
+                """,
+                (cutoff, max(1, min(int(limit), 200))),
+            ).fetchall()
+        return [self._from_row(row) for row in rows]
+
+    def inventory_reconciliation_candidates(
+        self,
+        limit: int = 50,
+        *,
+        recheck_after_hours: float = 24.0,
+    ) -> list[InventoryCheck]:
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(hours=max(0.0, recheck_after_hours))
+        ).isoformat(timespec="milliseconds")
+        with self._lock:
+            rows = self.connection.execute(
+                """
+                SELECT * FROM inventory_checks
+                WHERE sync_status = 'synced' AND remote_id IS NOT NULL
+                  AND (cloud_verified_at IS NULL OR cloud_verified_at <= ?)
+                ORDER BY COALESCE(cloud_verified_at, captured_at), id
+                LIMIT ?
+                """,
+                (cutoff, max(1, min(int(limit), 200))),
+            ).fetchall()
+        return [self._inventory_from_row(row) for row in rows]
+
+    def mark_cloud_verified(self, event_id: str, *, inventory: bool = False) -> None:
+        table = "inventory_checks" if inventory else "measurements"
+        now = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+        with self._lock:
+            self.connection.execute(
+                f"UPDATE {table} SET cloud_verified_at = ?, cloud_check_error = NULL "
+                "WHERE event_id = ?",
+                (now, event_id),
+            )
+            self.connection.commit()
+
+    def mark_cloud_check_failed(
+        self,
+        event_id: str,
+        error: str,
+        *,
+        inventory: bool = False,
+    ) -> None:
+        table = "inventory_checks" if inventory else "measurements"
+        with self._lock:
+            self.connection.execute(
+                f"UPDATE {table} SET cloud_verified_at = NULL, cloud_check_error = ? "
+                "WHERE event_id = ?",
+                (str(error)[:1000], event_id),
+            )
+            self.connection.commit()
+
+    def cleanup_verified_local_images(
+        self,
+        retention_days: float = 7.0,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, int]:
+        """Delete only old local evidence whose remote image was reconciled."""
+
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        cutoff = (current - timedelta(days=max(0.0, retention_days))).isoformat(
+            timespec="milliseconds"
+        )
+        with self._lock:
+            measurement_rows = self.connection.execute(
+                """
+                SELECT event_id, image_path, product_image_path
+                FROM measurements
+                WHERE sync_status = 'synced' AND cloud_verified_at IS NOT NULL
+                  AND cloud_check_error IS NULL AND local_images_deleted_at IS NULL
+                  AND captured_at <= ?
+                  AND remote_image_url IS NOT NULL AND remote_image_public_id IS NOT NULL
+                  AND (
+                    product_image_path = '' OR (
+                      remote_product_image_url IS NOT NULL
+                      AND remote_product_image_public_id IS NOT NULL
+                    )
+                  )
+                """,
+                (cutoff,),
+            ).fetchall()
+            inventory_rows = self.connection.execute(
+                """
+                SELECT event_id, image_path
+                FROM inventory_checks
+                WHERE sync_status = 'synced' AND cloud_verified_at IS NOT NULL
+                  AND cloud_check_error IS NULL AND local_images_deleted_at IS NULL
+                  AND captured_at <= ?
+                  AND remote_image_url IS NOT NULL AND remote_image_public_id IS NOT NULL
+                """,
+                (cutoff,),
+            ).fetchall()
+
+        deleted_files = 0
+        freed_bytes = 0
+        cleaned_rows = 0
+        capture_root = self.capture_dir.resolve()
+
+        def remove_paths(paths: list[str]) -> bool:
+            nonlocal deleted_files, freed_bytes
+            resolved: list[Path] = []
+            try:
+                for raw in paths:
+                    if not raw:
+                        continue
+                    path = Path(raw).resolve()
+                    path.relative_to(capture_root)
+                    resolved.append(path)
+            except (OSError, ValueError):
+                return False
+            for path in resolved:
+                try:
+                    size = path.stat().st_size if path.is_file() else 0
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    return False
+                if size:
+                    deleted_files += 1
+                    freed_bytes += size
+            return True
+
+        deleted_at = current.isoformat(timespec="milliseconds")
+        for row in measurement_rows:
+            if not remove_paths([str(row["image_path"]), str(row["product_image_path"])]):
+                continue
+            with self._lock:
+                self.connection.execute(
+                    "UPDATE measurements SET local_images_deleted_at = ? WHERE event_id = ?",
+                    (deleted_at, str(row["event_id"])),
+                )
+                self.connection.commit()
+            cleaned_rows += 1
+        for row in inventory_rows:
+            if not remove_paths([str(row["image_path"])]):
+                continue
+            with self._lock:
+                self.connection.execute(
+                    "UPDATE inventory_checks SET local_images_deleted_at = ? WHERE event_id = ?",
+                    (deleted_at, str(row["event_id"])),
+                )
+                self.connection.commit()
+            cleaned_rows += 1
+        return {
+            "rows": cleaned_rows,
+            "files": deleted_files,
+            "bytes": freed_bytes,
+        }
+
+    def integrity_summary(self) -> dict[str, int]:
+        with self._lock:
+            measurement = self.connection.execute(
+                """
+                SELECT
+                  SUM(CASE WHEN sync_status = 'pending' THEN 1 ELSE 0 END) AS pending,
+                  SUM(CASE WHEN sync_status = 'failed' THEN 1 ELSE 0 END) AS failed,
+                  SUM(CASE WHEN cloud_check_error IS NOT NULL THEN 1 ELSE 0 END) AS cloud_error,
+                  SUM(CASE WHEN sync_status = 'synced' AND cloud_verified_at IS NULL
+                           THEN 1 ELSE 0 END) AS unverified
+                FROM measurements
+                """
+            ).fetchone()
+            inventory = self.connection.execute(
+                """
+                SELECT
+                  SUM(CASE WHEN sync_status = 'pending' THEN 1 ELSE 0 END) AS pending,
+                  SUM(CASE WHEN sync_status = 'failed' THEN 1 ELSE 0 END) AS failed,
+                  SUM(CASE WHEN cloud_check_error IS NOT NULL THEN 1 ELSE 0 END) AS cloud_error,
+                  SUM(CASE WHEN sync_status = 'synced' AND cloud_verified_at IS NULL
+                           THEN 1 ELSE 0 END) AS unverified
+                FROM inventory_checks
+                """
+            ).fetchone()
+        return {
+            key: int(measurement[key] or 0) + int(inventory[key] or 0)
+            for key in ("pending", "failed", "cloud_error", "unverified")
+        }
 
     def inventory_pending_count(self) -> int:
         with self._lock:

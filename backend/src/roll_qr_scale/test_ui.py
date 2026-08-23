@@ -945,7 +945,7 @@ def _local_measurement_items(
         product_url = (
             f"/api/measurement-image?event_id={urllib.parse.quote(item.event_id)}&kind=product"
             if has_product
-            else None
+            else item.remote_product_image_url
         )
         payload = {
             "event_id": item.event_id,
@@ -962,6 +962,9 @@ def _local_measurement_items(
             "captured_at": item.captured_at,
             "sync_status": item.sync_status,
             "sync_error": item.sync_error,
+            "cloud_verified_at": item.cloud_verified_at,
+            "cloud_check_error": item.cloud_check_error,
+            "local_images_deleted_at": item.local_images_deleted_at,
             "core_image_url": core_url,
             "product_image_url": product_url,
             "has_core_image": bool(core_url),
@@ -1005,6 +1008,9 @@ def _local_inventory_items(
                 "image_url": image_url,
                 "sync_status": item.sync_status,
                 "sync_error": item.sync_error,
+                "cloud_verified_at": item.cloud_verified_at,
+                "cloud_check_error": item.cloud_check_error,
+                "local_images_deleted_at": item.local_images_deleted_at,
             }
         )
     return items
@@ -1044,15 +1050,27 @@ def _retry_sync_payload(
     if use_inventory:
         if inventory is None:
             raise ValueError("Không tìm thấy bản ghi Cân kiểm kho local để đồng bộ lại")
-        ok = service.sync_worker.sync_inventory_event(event_id)
+        ok = (
+            service.sync_worker.reconcile_event(event_id, inventory=True)
+            if inventory.sync_status == "synced"
+            else service.sync_worker.sync_inventory_event(event_id)
+        )
         latest = service.store.get_inventory_check(event_id)
     else:
         if measurement is None:
             raise ValueError("Không tìm thấy lần cân local để đồng bộ lại")
-        ok = service.sync_worker.sync_event(event_id)
+        ok = (
+            service.sync_worker.reconcile_event(event_id)
+            if measurement.sync_status == "synced"
+            else service.sync_worker.sync_event(event_id)
+        )
         latest = service.store.get(event_id)
     status = latest.sync_status if latest is not None else ("synced" if ok else "failed")
-    error = latest.sync_error if latest is not None else None
+    error = (
+        latest.sync_error or getattr(latest, "cloud_check_error", None)
+        if latest is not None
+        else None
+    )
     return {
         "ok": ok,
         "mode": "single",
@@ -2365,14 +2383,14 @@ class StationUIService:
                     + "; ".join(str(issue) for issue in quality_payload["issues"])
                 )
 
-        identity_values = (event_id, analysis_id, station_id, camera_id)
-        bound_capture = any(identity_values) or bool(frame_sha256)
+        binding_values = (analysis_id, station_id, camera_id)
+        bound_capture = any(binding_values) or bool(frame_sha256)
         if allow_missing_image:
             bound_capture = False
             event_id = event_id or str(uuid.uuid4())
             analysis_id = None
             frame_sha256 = None
-        if bound_capture and not all(identity_values):
+        if bound_capture and not all((event_id, analysis_id, station_id, camera_id)):
             raise ValueError("Cần đủ event_id, analysis_id, station_id và camera_id")
         computed_frame_sha = jpeg_sha256(encode_staged_jpeg(frame))
         if frame_sha256 and frame_sha256.lower() != computed_frame_sha:
@@ -2411,7 +2429,7 @@ class StationUIService:
 
         with self._lock:
             capture_key = frame_fingerprint(frame)
-            if not bound_capture and not allow_missing_image:
+            if not bound_capture and not allow_missing_image and not event_id:
                 now = time.monotonic()
                 if now - self._recent.get(capture_key, float("-inf")) < self.duplicate_window:
                     raise ValueError("Ảnh này vừa được lưu; hãy chụp khung hình mới")
@@ -2439,12 +2457,12 @@ class StationUIService:
                 weight_stable=True,
                 event_id=event_id,
                 captured_at=captured_at,
-                gateway_id=self.gateway_id if bound_capture else "",
+                gateway_id=self.gateway_id if (bound_capture or event_id) else "",
                 station_id=station_id or "",
                 camera_id=camera_id or "",
                 analysis_id=analysis_id or "",
             )
-            if not bound_capture and not allow_missing_image:
+            if not bound_capture and not allow_missing_image and not event_id:
                 self._recent[capture_key] = time.monotonic()
 
         if bound_capture:
@@ -2485,6 +2503,16 @@ class StationUIService:
                             int(remote["id"]) if remote.get("id") is not None else None,
                             str(core_url) if core_url else None,
                             str(core_public_id) if core_public_id else None,
+                            (
+                                str(remote["product_image_url"])
+                                if remote.get("product_image_url")
+                                else None
+                            ),
+                            (
+                                str(remote["product_image_public_id"])
+                                if remote.get("product_image_public_id")
+                                else None
+                            ),
                         )
                         cloud_confirmed = True
                     except Exception:
@@ -2508,6 +2536,12 @@ class StationUIService:
             "remote_id": current.remote_id,
             "remote_image_url": current.remote_image_url,
             "remote_image_public_id": getattr(current, "remote_image_public_id", None),
+            "remote_product_image_url": getattr(
+                current, "remote_product_image_url", None
+            ),
+            "remote_product_image_public_id": getattr(
+                current, "remote_product_image_public_id", None
+            ),
             "sync_error": current.sync_error,
             "pending_count": self.store.pending_count(),
         }
@@ -2917,6 +2951,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lookup-url", default=os.environ.get("ROLL_SCALE_LOOKUP_URL"))
     parser.add_argument("--lookup-token", default=os.environ.get("ROLL_SCALE_LOOKUP_TOKEN"))
     parser.add_argument(
+        "--cloud-reconcile-interval",
+        type=float,
+        default=float(os.environ.get("ROLL_SCALE_CLOUD_RECONCILE_INTERVAL", "300")),
+        help="Số giây giữa hai lượt đối soát URL ảnh Cloudinary",
+    )
+    parser.add_argument(
+        "--cloud-recheck-hours",
+        type=float,
+        default=float(os.environ.get("ROLL_SCALE_CLOUD_RECHECK_HOURS", "24")),
+        help="Số giờ trước khi kiểm tra lại ảnh cloud đã xác nhận",
+    )
+    parser.add_argument(
+        "--local-image-retention-days",
+        type=float,
+        default=float(os.environ.get("ROLL_SCALE_LOCAL_IMAGE_RETENTION_DAYS", "7")),
+        help="Số ngày giữ ảnh local sau khi đối soát cloud thành công",
+    )
+    parser.add_argument(
         "--gateway-id",
         "--device-id",
         dest="gateway_id",
@@ -3016,7 +3068,15 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
     store = MeasurementStore(args.db, args.captures)
     worker = None
     if args.api_url:
-        worker = OutboxSyncWorker(store, args.api_url, args.api_token, args.gateway_id)
+        worker = OutboxSyncWorker(
+            store,
+            args.api_url,
+            args.api_token,
+            args.gateway_id,
+            maintenance_interval=args.cloud_reconcile_interval,
+            retention_days=args.local_image_retention_days,
+            reconcile_recheck_hours=args.cloud_recheck_hours,
+        )
         worker.start()
     service = StationUIService(
         store,
@@ -3290,11 +3350,16 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                 return
             if parsed.path == "/api/status":
                 identity_status = service.status()
+                integrity = store.integrity_summary()
                 self.send_json(
                     200,
                     {
                         "ok": True,
                         "pending_count": store.pending_count(),
+                        "failed_count": integrity["failed"],
+                        "cloud_issue_count": integrity["cloud_error"],
+                        "cloud_unverified_count": integrity["unverified"],
+                        "cloud_integrity": integrity,
                         "yolo_enabled": service.reader.model is not None,
                          "yolo_mode": service.reader.yolo_mode,
                         "ocr_enabled": service.weight_engine != "gemini",

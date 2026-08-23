@@ -36,6 +36,12 @@ services:
         sync: false
       - key: ROLL_SCALE_DEVICE_TOKEN
         sync: false
+      - key: ROLL_SCALE_CLOUD_RECONCILE_INTERVAL
+        value: "300"
+      - key: ROLL_SCALE_CLOUD_RECHECK_HOURS
+        value: "24"
+      - key: ROLL_SCALE_LOCAL_IMAGE_RETENTION_DAYS
+        value: "7"
       - key: ROLL_SCALE_LOOKUP_URL
         sync: false
       - key: ROLL_SCALE_LOOKUP_TOKEN
