@@ -6,7 +6,7 @@ from pathlib import Path
 from collections.abc import Callable
 
 from .api_client import post_measurement, validate_ingest_response
-from .storage import InventoryCheck, Measurement, MeasurementStore
+from .storage import InventoryCheck, Measurement, MeasurementStore, PhotoDraft
 
 
 SendFunction = Callable[[str, dict[str, object], str, str], dict[str, object]]
@@ -128,6 +128,35 @@ class OutboxSyncWorker:
             self.store.mark_inventory_check_failed(check.event_id, str(exc))
             return False
 
+    def _sync_photo_draft(self, draft: PhotoDraft) -> bool:
+        try:
+            response = self.send(
+                self.api_url,
+                draft.api_payload(self.device_id),
+                draft.image_path,
+                self.device_token,
+            )
+            validate_ingest_response(
+                response,
+                draft.event_id,
+                require_remote_image=self.require_remote_image,
+            )
+            remote_id = response.get("id")
+            remote_image_url = response.get("image_url") or response.get("core_image_url")
+            remote_image_public_id = (
+                response.get("image_public_id") or response.get("core_image_public_id")
+            )
+            self.store.mark_photo_draft_synced(
+                draft.event_id,
+                int(remote_id) if remote_id is not None else None,
+                str(remote_image_url) if remote_image_url else None,
+                str(remote_image_public_id) if remote_image_public_id else None,
+            )
+            return True
+        except Exception as exc:
+            self.store.mark_photo_draft_failed(draft.event_id, str(exc))
+            return False
+
     def sync_event(self, event_id: str) -> bool:
         """Synchronize one just-confirmed event before the UI reports cloud success."""
 
@@ -150,6 +179,17 @@ class OutboxSyncWorker:
                 return True
             return self._sync_inventory_check(check)
 
+    def sync_photo_draft_event(self, event_id: str) -> bool:
+        """Synchronize a photo-only draft without invoking the weight AI."""
+
+        with self._sync_lock:
+            draft = self.store.get_photo_draft(event_id)
+            if draft is None:
+                return False
+            if draft.sync_status == "synced":
+                return True
+            return self._sync_photo_draft(draft)
+
     def sync_once(
         self,
         limit: int = 20,
@@ -159,7 +199,7 @@ class OutboxSyncWorker:
     ) -> int:
         with self._sync_lock:
             synced = 0
-            queued: list[Measurement | InventoryCheck] = [
+            queued: list[Measurement | InventoryCheck | PhotoDraft] = [
                 *self.store.pending(
                     limit,
                     include_deferred=include_deferred,
@@ -170,11 +210,18 @@ class OutboxSyncWorker:
                     include_deferred=include_deferred,
                     include_failed=retry_failed,
                 ),
+                *self.store.pending_photo_drafts(
+                    limit,
+                    include_deferred=include_deferred,
+                    include_failed=retry_failed,
+                ),
             ]
             queued.sort(key=lambda item: (item.captured_at, item.id))
             for item in queued[:limit]:
                 succeeded = (
-                    self._sync_inventory_check(item)
+                    self._sync_photo_draft(item)
+                    if isinstance(item, PhotoDraft)
+                    else self._sync_inventory_check(item)
                     if isinstance(item, InventoryCheck)
                     else self._sync_measurement(item)
                 )

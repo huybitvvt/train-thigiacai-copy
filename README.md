@@ -110,7 +110,7 @@ npx.cmd supabase@latest functions deploy lookup-roll --no-verify-jwt --use-api
 Set-Location ..
 ```
 
-`db push` áp dụng tuần tự toàn bộ [backend/supabase/migrations](backend/supabase/migrations), gồm schema ingest ban đầu, Cloudinary, bảng `can_tu_dong`, danh tính/hash, ảnh QR, kho OAuth Codex mã hóa và bảng một ảnh `can_kiem_kho` (`20260819150000_can_kiem_kho.sql`). Phải chạy migration trước rồi mới deploy lại hai Function; Edge Function mới chọn/ghi các cột hoặc bảng mới nên đảo thứ tự sẽ làm request lỗi. Nếu không dùng CLI, [backend/supabase_schema.sql](backend/supabase_schema.sql) là bản schema gộp để chạy có kiểm soát trong SQL Editor.
+`db push` áp dụng tuần tự toàn bộ [backend/supabase/migrations](backend/supabase/migrations), gồm schema ingest ban đầu, Cloudinary, bảng `can_tu_dong`, danh tính/hash, ảnh QR, kho OAuth Codex mã hóa, bảng một ảnh `can_kiem_kho` và bảng ảnh chờ `anh_can_cho_ai` (`20260824150000_anh_can_cho_ai.sql`). Phải chạy migration trước rồi mới deploy lại hai Function; Edge Function mới chọn/ghi các cột hoặc bảng mới nên đảo thứ tự sẽ làm request lỗi. Nếu không dùng CLI, [backend/supabase_schema.sql](backend/supabase_schema.sql) là bản schema gộp để chạy có kiểm soát trong SQL Editor.
 
 SQLite local tự thêm cột còn thiếu khi gateway mở database cũ và không xóa ảnh/bản ghi lịch sử. Hàng cũ giữ danh tính rỗng; hash được dựng lại từ hàng/ảnh hiện có khi có thể, còn ảnh legacy đã mất thì hash để rỗng thay vì bịa bằng chứng. `device_id` cloud cũ vẫn được đọc như fallback cho `gateway_id`, còn mọi capture mới phải mang bộ danh tính mới.
 
@@ -119,6 +119,7 @@ Schema tạo:
 - `devices`: các gateway được phép ghi/được cập nhật thời điểm nhìn thấy.
 - `rolls`: QR cuộn hàng và thời điểm nhìn thấy.
 - `can_tu_dong`: lịch sử cân tự động append-only, unique theo `event_id`; ảnh cân lõi nằm trong `core_image_*`, ảnh QR thứ hai nằm trong `qr_image_*`. Các cột `image_*` vẫn trỏ ảnh cân lõi để tương thích bản cũ.
+- `anh_can_cho_ai`: ảnh chụp độc lập đã lên Cloudinary, QR có thể trống và không có cột số cân; trạng thái ban đầu là `awaiting_ai` để xử lý nối tiếp sau.
 - `can_kiem_kho`: luồng song song chỉ chụp một ảnh/một khối lượng; lưu mã sản phẩm, khối lượng, khối lượng lõi nhập kèm, khối lượng bì và ảnh. Không tạo hoặc giả lập bước chụp cân lõi thứ hai.
 - `measurements`: bảng cũ được giữ để tương thích; migration sao chép lịch sử sang `can_tu_dong` trước khi Edge Function chuyển bảng.
 - `roll_scale_secrets`: chỉ service role được đọc/ghi; giữ payload OAuth Codex đã mã hóa để Render không mất đăng nhập khi redeploy.

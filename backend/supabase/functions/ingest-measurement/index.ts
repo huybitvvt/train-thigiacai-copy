@@ -4,6 +4,7 @@ const MAX_IMAGE_BYTES = 6 * 1024 * 1024;
 const UNITS = new Set(["kg", "g", "lb"]);
 const MEASUREMENT_TABLE = "can_tu_dong";
 const INVENTORY_TABLE = "can_kiem_kho";
+const PHOTO_DRAFT_TABLE = "anh_can_cho_ai";
 const SECRET_TABLE = "roll_scale_secrets";
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/i;
@@ -520,7 +521,8 @@ Deno.serve(async (request: Request) => {
 
   const workflow = typeof body.workflow === "string" ? body.workflow.trim() : "production";
   const inventoryCheck = workflow === "inventory_check";
-  if (!inventoryCheck && workflow !== "production" && workflow !== "") {
+  const photoDraft = workflow === "photo_draft";
+  if (!inventoryCheck && !photoDraft && workflow !== "production" && workflow !== "") {
     return json(422, { ok: false, error: "invalid_workflow" });
   }
   const eventId = typeof body.event_id === "string" ? body.event_id : "";
@@ -567,10 +569,18 @@ Deno.serve(async (request: Request) => {
     const match = weightRaw.match(new RegExp(`(?:^|; )\\s*${name}=([^;]+)`));
     return match ? match[1].trim().slice(0, 80) : "";
   };
-  const workDate = sourceTag("SOURCE_DATE");
-  const shift = sourceTag("SOURCE_SHIFT");
-  const machine = sourceTag("SOURCE_MACHINE");
-  const productionOrder = sourceTag("SOURCE_PRODUCTION_ORDER");
+  const workDate = typeof body.work_date === "string"
+    ? body.work_date.trim().slice(0, 10)
+    : sourceTag("SOURCE_DATE");
+  const shift = typeof body.shift === "string"
+    ? body.shift.trim().slice(0, 80)
+    : sourceTag("SOURCE_SHIFT");
+  const machine = typeof body.machine === "string"
+    ? body.machine.trim().slice(0, 80)
+    : sourceTag("SOURCE_MACHINE");
+  const productionOrder = typeof body.production_order === "string"
+    ? body.production_order.trim().slice(0, 80)
+    : sourceTag("SOURCE_PRODUCTION_ORDER");
   const biWeightRaw = sourceTag("BI_WEIGHT");
   const biWeightParsed = Number(biWeightRaw);
   const biWeight = Number.isFinite(biWeightParsed) && biWeightParsed >= 0
@@ -580,7 +590,10 @@ Deno.serve(async (request: Request) => {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(eventId)) {
     return json(422, { ok: false, error: "invalid_event_id" });
   }
-  if (!qrCode || qrCode.length > 512 || (inventoryCheck && productCode !== qrCode)) {
+  if (
+    (!photoDraft && !qrCode) || qrCode.length > 512 ||
+    (inventoryCheck && productCode !== qrCode)
+  ) {
     return json(422, { ok: false, error: "invalid_qr_code" });
   }
   if (body.gateway_id !== undefined && body.gateway_id !== null && !suppliedGatewayId) {
@@ -618,7 +631,7 @@ Deno.serve(async (request: Request) => {
   ) {
     return json(422, { ok: false, error: "invalid_payload_hash" });
   }
-  if (!Number.isFinite(weight) || weight < 0 || !UNITS.has(unit)) {
+  if (!photoDraft && (!Number.isFinite(weight) || weight < 0 || !UNITS.has(unit))) {
     return json(422, { ok: false, error: "invalid_weight" });
   }
   if (!capturedAt || Number.isNaN(Date.parse(capturedAt))) {
@@ -627,7 +640,7 @@ Deno.serve(async (request: Request) => {
   if (imageBase64.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4 + 4) {
     return json(413, { ok: false, error: "image_too_large" });
   }
-  if (!inventoryCheck && (!Number.isFinite(productWeight) || productWeight < 0)) {
+  if (!inventoryCheck && !photoDraft && (!Number.isFinite(productWeight) || productWeight < 0)) {
     return json(422, { ok: false, error: "invalid_product_weight" });
   }
   if (
@@ -640,7 +653,11 @@ Deno.serve(async (request: Request) => {
   if (productImageBase64.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4 + 4) {
     return json(413, { ok: false, error: "product_image_too_large" });
   }
-  const expectedImageRole = inventoryCheck ? "inventory_check" : "core_weight";
+  const expectedImageRole = photoDraft
+    ? "photo_draft"
+    : inventoryCheck
+    ? "inventory_check"
+    : "core_weight";
   if (imageRole && imageRole !== expectedImageRole) {
     return json(422, { ok: false, error: "invalid_image_role" });
   }
@@ -683,6 +700,133 @@ Deno.serve(async (request: Request) => {
   const supabase = createClient(supabaseUrl, serviceKey, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
+
+  if (photoDraft) {
+    const photoSelect =
+      "id,event_id,qr_code,captured_at,image_path,image_url,image_public_id," +
+      "gateway_id,station_id,camera_id,frame_sha256,payload_hash,qr_source," +
+      "work_date,shift,machine,production_order,status";
+    const { data: existingPhoto, error: photoLookupError } = await supabase
+      .from(PHOTO_DRAFT_TABLE)
+      .select(photoSelect)
+      .eq("event_id", eventId)
+      .maybeSingle();
+    if (photoLookupError) {
+      return json(500, { ok: false, error: "photo_draft_lookup_failed" });
+    }
+    if (existingPhoto) {
+      const existingRow = existingPhoto as unknown as Record<string, unknown>;
+      if (
+        existingRow.payload_hash !== payloadHash ||
+        existingRow.frame_sha256 !== frameSha256
+      ) {
+        return json(409, { ok: false, error: "event_id_conflict" });
+      }
+      return json(200, {
+        ok: true,
+        id: existingRow.id,
+        event_id: eventId,
+        image_url: existingRow.image_url,
+        image_public_id: existingRow.image_public_id,
+        qr_code: existingRow.qr_code,
+        status: existingRow.status,
+        workflow: "photo_draft",
+        duplicate: true,
+      });
+    }
+
+    const photoNow = new Date().toISOString();
+    const { error: photoDeviceError } = await supabase.from("devices").upsert(
+      { id: gatewayId, last_seen_at: photoNow },
+      { onConflict: "id" },
+    );
+    if (photoDeviceError) {
+      return json(500, { ok: false, error: "device_upsert_failed" });
+    }
+    const captureDate = new Date(capturedAt);
+    const year = captureDate.getUTCFullYear();
+    const month = String(captureDate.getUTCMonth() + 1).padStart(2, "0");
+    const day = String(captureDate.getUTCDate()).padStart(2, "0");
+    let uploaded: CloudinaryUpload;
+    try {
+      uploaded = await uploadToCloudinary(
+        image,
+        `roll-captures/${gatewayId}/${year}/${month}/${day}/photo-draft/${eventId}`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "cloudinary_upload_failed";
+      return json(500, { ok: false, error: message.split(":", 1)[0] });
+    }
+    const { data: insertedPhoto, error: photoInsertError } = await supabase
+      .from(PHOTO_DRAFT_TABLE)
+      .insert({
+        event_id: eventId,
+        qr_code: qrCode || null,
+        captured_at: capturedAt,
+        image_path: uploaded.publicId,
+        image_url: uploaded.secureUrl,
+        image_public_id: uploaded.publicId,
+        gateway_id: gatewayId,
+        station_id: stationId,
+        camera_id: cameraId,
+        frame_sha256: frameSha256,
+        payload_hash: payloadHash,
+        qr_source: qrSource,
+        work_date: workDate || null,
+        shift: shift || null,
+        machine: machine || null,
+        production_order: productionOrder || null,
+        status: "awaiting_ai",
+        metadata: {
+          ai_requested: false,
+          ingested_at: photoNow,
+          workflow: "photo_draft",
+        },
+      })
+      .select(photoSelect)
+      .single();
+    if (photoInsertError || !insertedPhoto) {
+      if (photoInsertError?.code === "23505") {
+        const { data: racedPhoto } = await supabase
+          .from(PHOTO_DRAFT_TABLE)
+          .select(photoSelect)
+          .eq("event_id", eventId)
+          .maybeSingle();
+        if (racedPhoto) {
+          const racedRow = racedPhoto as unknown as Record<string, unknown>;
+          if (
+            racedRow.payload_hash !== payloadHash ||
+            racedRow.frame_sha256 !== frameSha256
+          ) {
+            return json(409, { ok: false, error: "event_id_conflict" });
+          }
+          return json(200, {
+            ok: true,
+            id: racedRow.id,
+            event_id: eventId,
+            image_url: racedRow.image_url,
+            image_public_id: racedRow.image_public_id,
+            qr_code: racedRow.qr_code,
+            status: racedRow.status,
+            workflow: "photo_draft",
+            duplicate: true,
+          });
+        }
+      }
+      return json(500, { ok: false, error: "photo_draft_insert_failed" });
+    }
+    return json(201, {
+      ok: true,
+      id: insertedPhoto.id,
+      event_id: eventId,
+      image_url: uploaded.secureUrl,
+      image_public_id: uploaded.publicId,
+      qr_code: insertedPhoto.qr_code,
+      status: insertedPhoto.status,
+      workflow: "photo_draft",
+      duplicate: false,
+    });
+  }
 
   if (inventoryCheck) {
     const inventorySelect =

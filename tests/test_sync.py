@@ -138,6 +138,43 @@ def test_outbox_syncs_inventory_check_to_parallel_workflow(tmp_path) -> None:
     store.close()
 
 
+def test_outbox_syncs_photo_draft_without_weight_fields(tmp_path) -> None:
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    draft, _ = store.save_photo_draft_idempotent(
+        np.zeros((40, 60, 3), dtype=np.uint8),
+        qr_code="QR-PHOTO-ONLY",
+        qr_source="camera:zxing",
+        needs_sync=True,
+        event_id="2ab71440-c330-41e8-9682-c940debf74d1",
+        gateway_id="gateway-row",
+        station_id="station-01",
+        camera_id="camera-01",
+    )
+    sent: list[dict[str, object]] = []
+
+    def fake_send(url, payload, image_path, token):
+        sent.append(dict(payload))
+        return {
+            "ok": True,
+            "event_id": draft.event_id,
+            "id": 701,
+            "image_url": "https://images.example/photo-draft.jpg",
+            "image_public_id": "roll-captures/photo-draft/event",
+        }
+
+    worker = OutboxSyncWorker(store, "https://example.test", "token", send=fake_send)
+    assert worker.sync_photo_draft_event(draft.event_id) is True
+    saved = store.get_photo_draft(draft.event_id)
+
+    assert saved is not None and saved.sync_status == "synced"
+    assert sent[0]["workflow"] == "photo_draft"
+    assert sent[0]["status"] == "awaiting_ai"
+    assert sent[0]["qr_code"] == "QR-PHOTO-ONLY"
+    assert "weight" not in sent[0]
+    assert "unit" not in sent[0]
+    store.close()
+
+
 def test_outbox_requires_product_image_ack_for_two_image_event(tmp_path) -> None:
     store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
     measurement = store.save(

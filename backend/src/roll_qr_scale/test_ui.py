@@ -1728,7 +1728,13 @@ class StationUIService:
                 pass
 
     def discard_session(self, station_id: str, *, event_id: str | None = None) -> bool:
-        discarded = self.sessions.discard(station_id, event_id=event_id)
+        try:
+            discarded = self.sessions.discard(station_id, event_id=event_id)
+        except AnalysisBindingMismatch:
+            # The browser may only know the photo event after an AI failure.
+            # Clearing the station binding is safe here and must not prevent
+            # the operator from dropping the failed local preview.
+            discarded = self.sessions.discard(station_id)
         if event_id:
             self._cleanup_evidence_steps(station_id, event_id)
         return discarded
@@ -1776,6 +1782,95 @@ class StationUIService:
 
     def decode_qr(self, frame: np.ndarray) -> dict[str, object]:
         return self.inference.run(self._decode_qr, frame)
+
+    def capture_photo_draft(
+        self,
+        frame: np.ndarray,
+        *,
+        client_qr_code: str = "",
+        event_id: str | None = None,
+        station_id: str = "",
+        camera_id: str = "",
+        work_date: str = "",
+        shift: str = "",
+        machine: str = "",
+        production_order: str = "",
+    ) -> dict[str, object]:
+        """Save one image for later AI processing while decoding QR locally."""
+
+        event_id = str(event_id or uuid.uuid4()).strip()
+        try:
+            parsed_event_id = uuid.UUID(event_id)
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise ValueError("event_id ảnh chờ không hợp lệ") from exc
+        if parsed_event_id.version != 4:
+            raise ValueError("event_id ảnh chờ phải là UUID v4")
+        configured = {
+            (str(item["station_id"]), str(item["camera_id"]))
+            for item in self.station_configs
+        }
+        if (station_id, camera_id) not in configured:
+            raise ValueError("Trạm hoặc camera không hợp lệ")
+
+        client_qr = client_qr_code.strip()
+        if len(client_qr) > 512 or any(ord(character) < 32 for character in client_qr):
+            raise ValueError("Mã QR từ trình duyệt không hợp lệ")
+        # QR is deliberately outside the shared AI/FIFO inference queue so a
+        # busy or failed Gemini request cannot delay photo-only capture.
+        decoded = self._decode_qr(frame)
+        local_qr = str(decoded.get("qr_code") or "").strip()
+        qr_conflict = bool(client_qr and local_qr and client_qr != local_qr)
+        if qr_conflict:
+            qr_code = ""
+            qr_source = "browser+backend-conflict"
+        elif local_qr:
+            qr_code = local_qr
+            qr_source = f"camera:{decoded.get('decoder', 'local')}"
+            if client_qr:
+                qr_source += "+browser-confirmed"
+        elif client_qr:
+            qr_code = client_qr
+            qr_source = "browser-barcode-detector"
+        else:
+            qr_code = ""
+            qr_source = "none"
+
+        draft, duplicate = self.store.save_photo_draft_idempotent(
+            frame,
+            qr_code=qr_code,
+            qr_source=qr_source,
+            needs_sync=self.sync_worker is not None,
+            event_id=event_id,
+            work_date=work_date,
+            shift=shift,
+            machine=machine,
+            production_order=production_order,
+            gateway_id=self.gateway_id,
+            station_id=station_id,
+            camera_id=camera_id,
+        )
+        if self.sync_worker is not None:
+            self.sync_worker.sync_photo_draft_event(draft.event_id)
+        current = self.store.get_photo_draft(draft.event_id) or draft
+        return {
+            "ok": True,
+            "id": current.id,
+            "event_id": current.event_id,
+            "workflow": "photo_draft",
+            "status": current.status,
+            "duplicate": duplicate,
+            "qr_found": bool(current.qr_code),
+            "qr_conflict": qr_conflict,
+            "qr_code": current.qr_code,
+            "qr_decoder": current.qr_source,
+            "sync_status": current.sync_status,
+            "remote_id": current.remote_id,
+            "remote_image_url": current.remote_image_url,
+            "remote_image_public_id": current.remote_image_public_id,
+            "sync_error": current.sync_error,
+            "pending_count": self.store.pending_count(),
+            "ai_requested": False,
+        }
 
     def assess_quality(self, frame: np.ndarray) -> FrameQuality:
         return assess_frame_quality(frame, **self.quality_settings)
@@ -3608,6 +3703,20 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                 )
                 if self.path == "/api/decode":
                     self.send_json(200, service.decode_qr(frame))
+                    return
+                if self.path == "/api/photo-capture":
+                    result = service.capture_photo_draft(
+                        frame,
+                        client_qr_code=str(payload.get("client_qr_code", "")),
+                        event_id=str(payload.get("event_id", "")) or None,
+                        station_id=str(payload.get("station_id", "")),
+                        camera_id=str(payload.get("camera_id", "")),
+                        work_date=str(payload.get("work_date", "")),
+                        shift=str(payload.get("shift", "")),
+                        machine=str(payload.get("machine", "")),
+                        production_order=str(payload.get("production_order", "")),
+                    )
+                    self.send_json(201, result)
                     return
                 if self.path == "/api/analyze":
                     capture_kind = str(payload.get("capture_kind", "")).strip().lower()

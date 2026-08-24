@@ -42,6 +42,18 @@ def test_decode_image_accepts_browser_data_url() -> None:
     assert decoded.shape == frame.shape
 
 
+def test_photo_only_button_is_independent_from_ai_and_next_to_discard() -> None:
+    photo_position = TEST_UI_HTML.index('id="photoOnlyBtn"')
+    discard_position = TEST_UI_HTML.index('id="discardBtn"')
+    assert photo_position < discard_position
+    assert "function capturePhotoOnly()" in TEST_UI_HTML
+    assert "'/api/photo-capture'" in TEST_UI_HTML
+    assert "client_qr_code:clientQr" in TEST_UI_HTML
+    assert "ĐÃ CHỤP ẢNH · KHÔNG GỌI AI" in TEST_UI_HTML
+    assert "bindActionButton('photoOnlyBtn',()=>capturePhotoOnly())" in TEST_UI_HTML
+    assert "console.warn('Không dọn được phiên backend, vẫn bỏ ảnh local:'" in TEST_UI_HTML
+
+
 def test_ui_capture_decodes_qr_and_saves_stable_manual_weight(tmp_path) -> None:
     store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
     service = StationUIService(store, None, None, None)
@@ -166,6 +178,60 @@ def test_ui_inventory_capture_uses_one_image_without_core_capture(tmp_path) -> N
     assert saved.tare_weight == pytest.approx(0.16)
     assert Path(saved.image_path).is_file()
     assert store.count() == 0
+    service.close()
+    store.close()
+
+
+def test_ui_photo_capture_decodes_qr_without_calling_weight_ai(tmp_path) -> None:
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    sent: list[dict[str, object]] = []
+
+    def fake_send(url, payload, image_path, token):
+        sent.append(dict(payload))
+        return {
+            "ok": True,
+            "event_id": payload["event_id"],
+            "id": 801,
+            "image_url": "https://images.example/photo-only.jpg",
+            "image_public_id": "roll-captures/photo-draft/photo-only",
+        }
+
+    worker = OutboxSyncWorker(store, "https://example.test", "token", send=fake_send)
+    service = StationUIService(store, worker, None, None)
+    result = service.capture_photo_draft(
+        make_qr_frame("QR-PHOTO-ONLY-UI"),
+        event_id="6a60273c-ea0c-44e8-9599-1ae4c8e597ce",
+        station_id="station-01",
+        camera_id="camera-01",
+    )
+    saved = store.get_photo_draft(str(result["event_id"]))
+
+    assert result["ai_requested"] is False
+    assert result["qr_code"] == "QR-PHOTO-ONLY-UI"
+    assert result["sync_status"] == "synced"
+    assert saved is not None and saved.status == "awaiting_ai"
+    assert store.count() == 0
+    assert sent[0]["workflow"] == "photo_draft"
+    service.close()
+    store.close()
+
+
+def test_discard_session_clears_failed_binding_even_if_browser_event_is_stale(tmp_path) -> None:
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(store, None, None, None)
+    actual_event_id = str(uuid.uuid4())
+    binding = service.sessions.stage(
+        make_qr_frame("QR-FAILED-DISCARD"),
+        event_id=actual_event_id,
+        station_id="station-01",
+        camera_id="camera-01",
+    )
+    service.sessions.mark_failed(binding.analysis_id, RuntimeError("AI failed"))
+
+    assert service.discard_session("station-01", event_id=str(uuid.uuid4())) is True
+    status_row = service.sessions.statuses()[0]
+    assert status_row["state"] == "idle"
+    assert status_row["event_id"] is None
     service.close()
     store.close()
 

@@ -143,6 +143,67 @@ class InventoryCheck:
 
 
 @dataclass(frozen=True)
+class PhotoDraft:
+    """One photo saved for later AI processing, without fabricated weights."""
+
+    id: int
+    event_id: str
+    qr_code: str
+    captured_at: str
+    image_path: str
+    qr_source: str
+    sync_status: str
+    work_date: str = ""
+    shift: str = ""
+    machine: str = ""
+    production_order: str = ""
+    status: str = "awaiting_ai"
+    retry_count: int = 0
+    sync_error: str | None = None
+    remote_id: int | None = None
+    remote_image_url: str | None = None
+    remote_image_public_id: str | None = None
+    gateway_id: str = ""
+    station_id: str = ""
+    camera_id: str = ""
+    frame_sha256: str = ""
+    payload_hash: str = ""
+
+    def api_payload(self, device_id: str = "") -> dict[str, object]:
+        payload = asdict(self)
+        for local_field in (
+            "id",
+            "sync_status",
+            "retry_count",
+            "sync_error",
+            "remote_id",
+            "remote_image_url",
+            "remote_image_public_id",
+            "image_path",
+        ):
+            payload.pop(local_field)
+        payload["workflow"] = "photo_draft"
+        effective_gateway_id = self.gateway_id or device_id
+        for optional_field in (
+            "qr_code",
+            "work_date",
+            "shift",
+            "machine",
+            "production_order",
+            "station_id",
+            "camera_id",
+            "frame_sha256",
+            "payload_hash",
+        ):
+            if not payload.get(optional_field):
+                payload.pop(optional_field, None)
+        if effective_gateway_id:
+            payload["gateway_id"] = effective_gateway_id
+            payload["device_id"] = effective_gateway_id
+        return payload
+
+
+@dataclass(frozen=True)
 class SaveResult:
     measurement: Measurement
     duplicate: bool
@@ -249,6 +310,37 @@ class MeasurementStore:
             )
             """
         )
+        self.connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS photo_drafts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT NOT NULL UNIQUE,
+                qr_code TEXT NOT NULL DEFAULT '',
+                captured_at TEXT NOT NULL,
+                image_path TEXT NOT NULL,
+                qr_source TEXT NOT NULL DEFAULT 'none',
+                work_date TEXT NOT NULL DEFAULT '',
+                shift TEXT NOT NULL DEFAULT '',
+                machine TEXT NOT NULL DEFAULT '',
+                production_order TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'awaiting_ai',
+                sync_status TEXT NOT NULL DEFAULT 'local',
+                sync_error TEXT,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                next_retry_at TEXT,
+                last_attempt_at TEXT,
+                synced_at TEXT,
+                remote_id INTEGER,
+                remote_image_url TEXT,
+                remote_image_public_id TEXT,
+                gateway_id TEXT NOT NULL DEFAULT '',
+                station_id TEXT NOT NULL DEFAULT '',
+                camera_id TEXT NOT NULL DEFAULT '',
+                frame_sha256 TEXT NOT NULL DEFAULT '',
+                payload_hash TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
         self._migrate_existing_database()
         self.connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_measurements_qr ON measurements(qr_code)"
@@ -272,6 +364,14 @@ class MeasurementStore:
         self.connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_inventory_checks_station_time "
             "ON inventory_checks(gateway_id, station_id, camera_id, captured_at DESC)"
+        )
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_photo_drafts_outbox "
+            "ON photo_drafts(sync_status, next_retry_at)"
+        )
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_photo_drafts_status_time "
+            "ON photo_drafts(status, captured_at DESC)"
         )
         self.connection.commit()
 
@@ -443,6 +543,44 @@ class MeasurementStore:
             immutable_payload,
             ensure_ascii=False,
             allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
+
+    @staticmethod
+    def _calculate_photo_draft_payload_hash(
+        *,
+        qr_code: str,
+        qr_source: str,
+        captured_at: str,
+        work_date: str,
+        shift: str,
+        machine: str,
+        production_order: str,
+        gateway_id: str,
+        station_id: str,
+        camera_id: str,
+        frame_sha256: str,
+    ) -> str:
+        immutable_payload = {
+            "camera_id": camera_id,
+            "captured_at": captured_at,
+            "frame_sha256": frame_sha256,
+            "gateway_id": gateway_id,
+            "machine": machine,
+            "production_order": production_order,
+            "qr_code": qr_code,
+            "qr_source": qr_source,
+            "shift": shift,
+            "station_id": station_id,
+            "status": "awaiting_ai",
+            "work_date": work_date,
+            "workflow": "photo_draft",
+        }
+        canonical = json.dumps(
+            immutable_payload,
+            ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
@@ -1039,6 +1177,244 @@ class MeasurementStore:
             )
             self.connection.commit()
 
+    def save_photo_draft_idempotent(
+        self,
+        frame: np.ndarray,
+        *,
+        qr_code: str = "",
+        qr_source: str = "none",
+        needs_sync: bool = False,
+        event_id: str | None = None,
+        captured_at: str | None = None,
+        work_date: str = "",
+        shift: str = "",
+        machine: str = "",
+        production_order: str = "",
+        gateway_id: str = "",
+        station_id: str = "",
+        camera_id: str = "",
+    ) -> tuple[PhotoDraft, bool]:
+        qr_code = qr_code.strip()
+        if len(qr_code) > 512 or any(ord(character) < 32 for character in qr_code):
+            raise ValueError("QR must be empty or contain at most 512 printable characters")
+        event_id = event_id or str(uuid.uuid4())
+        if captured_at is None:
+            existing_draft = self.get_photo_draft(event_id)
+            if existing_draft is not None:
+                captured_at = existing_draft.captured_at
+        captured_at = captured_at or datetime.now(timezone.utc).isoformat(
+            timespec="milliseconds"
+        )
+        encoded_ok, encoded_frame = cv2.imencode(".jpg", frame)
+        if not encoded_ok:
+            raise OSError("Cannot encode photo draft as JPEG")
+        jpeg_bytes = encoded_frame.tobytes()
+        frame_sha256 = hashlib.sha256(jpeg_bytes).hexdigest()
+        payload_hash = self._calculate_photo_draft_payload_hash(
+            qr_code=qr_code,
+            qr_source=qr_source,
+            captured_at=captured_at,
+            work_date=work_date,
+            shift=shift,
+            machine=machine,
+            production_order=production_order,
+            gateway_id=gateway_id,
+            station_id=station_id,
+            camera_id=camera_id,
+            frame_sha256=frame_sha256,
+        )
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        event_token = hashlib.sha256(event_id.encode("utf-8")).hexdigest()[:8]
+        image_path = (
+            self.capture_dir
+            / f"{timestamp}_{event_token}_{uuid.uuid4().hex[:8]}_photo_draft.jpg"
+        )
+        try:
+            image_path.write_bytes(jpeg_bytes)
+        except OSError as exc:
+            image_path.unlink(missing_ok=True)
+            raise OSError(f"Cannot write photo draft: {image_path}") from exc
+
+        try:
+            with self._lock:
+                existing = self.connection.execute(
+                    "SELECT * FROM photo_drafts WHERE event_id = ?", (event_id,)
+                ).fetchone()
+                if existing is not None:
+                    image_path.unlink(missing_ok=True)
+                    if str(existing["payload_hash"]) == payload_hash:
+                        return self._photo_draft_from_row(existing), True
+                    raise EventIdConflictError(event_id)
+                self.connection.execute(
+                    """
+                    INSERT INTO photo_drafts (
+                        event_id, qr_code, captured_at, image_path, qr_source,
+                        work_date, shift, machine, production_order, status,
+                        sync_status, gateway_id, station_id, camera_id,
+                        frame_sha256, payload_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_ai', ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event_id,
+                        qr_code,
+                        captured_at,
+                        str(image_path.resolve()),
+                        qr_source,
+                        work_date[:10],
+                        shift[:80],
+                        machine[:80],
+                        production_order[:80],
+                        "pending" if needs_sync else "local",
+                        gateway_id,
+                        station_id,
+                        camera_id,
+                        frame_sha256,
+                        payload_hash,
+                    ),
+                )
+                self.connection.commit()
+        except sqlite3.IntegrityError as exc:
+            with self._lock:
+                self.connection.rollback()
+                existing = self.connection.execute(
+                    "SELECT * FROM photo_drafts WHERE event_id = ?", (event_id,)
+                ).fetchone()
+            image_path.unlink(missing_ok=True)
+            if existing is not None and str(existing["payload_hash"]) == payload_hash:
+                return self._photo_draft_from_row(existing), True
+            if existing is not None:
+                raise EventIdConflictError(event_id) from exc
+            raise
+        except Exception:
+            image_path.unlink(missing_ok=True)
+            raise
+        saved = self.get_photo_draft(event_id)
+        if saved is None:  # pragma: no cover
+            image_path.unlink(missing_ok=True)
+            raise RuntimeError(f"Inserted photo draft cannot be read back: {event_id}")
+        return saved, False
+
+    @staticmethod
+    def _photo_draft_from_row(row: sqlite3.Row) -> PhotoDraft:
+        return PhotoDraft(
+            id=int(row["id"]),
+            event_id=str(row["event_id"]),
+            qr_code=str(row["qr_code"]),
+            captured_at=str(row["captured_at"]),
+            image_path=str(row["image_path"]),
+            qr_source=str(row["qr_source"]),
+            sync_status=str(row["sync_status"]),
+            work_date=str(row["work_date"]),
+            shift=str(row["shift"]),
+            machine=str(row["machine"]),
+            production_order=str(row["production_order"]),
+            status=str(row["status"]),
+            retry_count=int(row["retry_count"]),
+            sync_error=str(row["sync_error"]) if row["sync_error"] is not None else None,
+            remote_id=int(row["remote_id"]) if row["remote_id"] is not None else None,
+            remote_image_url=(
+                str(row["remote_image_url"]) if row["remote_image_url"] is not None else None
+            ),
+            remote_image_public_id=(
+                str(row["remote_image_public_id"])
+                if row["remote_image_public_id"] is not None
+                else None
+            ),
+            gateway_id=str(row["gateway_id"]),
+            station_id=str(row["station_id"]),
+            camera_id=str(row["camera_id"]),
+            frame_sha256=str(row["frame_sha256"]),
+            payload_hash=str(row["payload_hash"]),
+        )
+
+    def get_photo_draft(self, event_id: str) -> PhotoDraft | None:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT * FROM photo_drafts WHERE event_id = ?", (event_id,)
+            ).fetchone()
+        return self._photo_draft_from_row(row) if row else None
+
+    def pending_photo_drafts(
+        self,
+        limit: int = 20,
+        include_deferred: bool = False,
+        *,
+        include_failed: bool = True,
+    ) -> list[PhotoDraft]:
+        now = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+        retry_clause = "" if include_deferred else "AND (next_retry_at IS NULL OR next_retry_at <= ?)"
+        parameters: tuple[object, ...] = (limit,) if include_deferred else (now, limit)
+        statuses = "('pending', 'failed')" if include_failed else "('pending')"
+        with self._lock:
+            rows = self.connection.execute(
+                f"""
+                SELECT * FROM photo_drafts
+                WHERE sync_status IN {statuses}
+                  {retry_clause}
+                ORDER BY id
+                LIMIT ?
+                """,
+                parameters,
+            ).fetchall()
+        return [self._photo_draft_from_row(row) for row in rows]
+
+    def mark_photo_draft_synced(
+        self,
+        event_id: str,
+        remote_id: int | None = None,
+        remote_image_url: str | None = None,
+        remote_image_public_id: str | None = None,
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+        with self._lock:
+            self.connection.execute(
+                """
+                UPDATE photo_drafts
+                SET sync_status = 'synced', sync_error = NULL, next_retry_at = NULL,
+                    last_attempt_at = ?, synced_at = ?, remote_id = ?,
+                    remote_image_url = ?, remote_image_public_id = ?
+                WHERE event_id = ?
+                """,
+                (now, now, remote_id, remote_image_url, remote_image_public_id, event_id),
+            )
+            self.connection.commit()
+
+    def mark_photo_draft_failed(self, event_id: str, error: str) -> None:
+        now_dt = datetime.now(timezone.utc)
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT retry_count FROM photo_drafts WHERE event_id = ?", (event_id,)
+            ).fetchone()
+            retry_count = (int(row["retry_count"]) if row else 0) + 1
+            delay_seconds = min(300, 2 ** min(retry_count, 8))
+            next_retry = (now_dt + timedelta(seconds=delay_seconds)).isoformat(
+                timespec="milliseconds"
+            )
+            self.connection.execute(
+                """
+                UPDATE photo_drafts
+                SET sync_status = 'failed', sync_error = ?, retry_count = ?,
+                    last_attempt_at = ?, next_retry_at = ?
+                WHERE event_id = ?
+                """,
+                (
+                    error[:1000],
+                    retry_count,
+                    now_dt.isoformat(timespec="milliseconds"),
+                    next_retry,
+                    event_id,
+                ),
+            )
+            self.connection.commit()
+
+    def photo_draft_pending_count(self) -> int:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT COUNT(*) AS total FROM photo_drafts "
+                "WHERE sync_status IN ('pending', 'failed')"
+            ).fetchone()
+        return int(row["total"])
+
     def inventory_pending_count(self) -> int:
         with self._lock:
             row = self.connection.execute(
@@ -1053,7 +1429,11 @@ class MeasurementStore:
                 "SELECT COUNT(*) AS total FROM measurements "
                 "WHERE sync_status IN ('pending', 'failed')"
             ).fetchone()
-        return int(row["total"]) + self.inventory_pending_count()
+        return (
+            int(row["total"])
+            + self.inventory_pending_count()
+            + self.photo_draft_pending_count()
+        )
 
     def count(self) -> int:
         with self._lock:

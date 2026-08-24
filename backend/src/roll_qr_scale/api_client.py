@@ -256,9 +256,12 @@ def post_measurement(
     body["image_base64"] = base64.b64encode(Path(image_path).read_bytes()).decode("ascii")
     # The shared ingest endpoint routes one-photo inventory checks separately
     # while preserving the established core-weight role for production slips.
+    workflow = body.get("workflow")
     body["image_role"] = (
         "inventory_check"
-        if body.get("workflow") == "inventory_check"
+        if workflow == "inventory_check"
+        else "photo_draft"
+        if workflow == "photo_draft"
         else "core_weight"
     )
     headers = {

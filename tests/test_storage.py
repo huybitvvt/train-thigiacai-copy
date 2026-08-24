@@ -31,6 +31,42 @@ def test_saves_measurement_and_evidence_image(tmp_path) -> None:
     assert row == ("ROLL-001", 81.25, "kg", "manual", "camera")
 
 
+def test_photo_draft_saves_image_without_weight_or_required_qr(tmp_path) -> None:
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    event_id = "d037931d-089d-44ce-96c5-53d41a95c933"
+    draft, duplicate = store.save_photo_draft_idempotent(
+        np.zeros((80, 120, 3), dtype=np.uint8),
+        event_id=event_id,
+        needs_sync=True,
+        gateway_id="gateway-test",
+        station_id="station-01",
+        camera_id="camera-01",
+    )
+    again, is_duplicate = store.save_photo_draft_idempotent(
+        np.zeros((80, 120, 3), dtype=np.uint8),
+        event_id=event_id,
+        needs_sync=True,
+        gateway_id="gateway-test",
+        station_id="station-01",
+        camera_id="camera-01",
+    )
+
+    columns = {
+        str(row["name"])
+        for row in store.connection.execute("PRAGMA table_info(photo_drafts)").fetchall()
+    }
+    assert duplicate is False
+    assert is_duplicate is True
+    assert again == draft
+    assert draft.qr_code == ""
+    assert draft.status == "awaiting_ai"
+    assert draft.sync_status == "pending"
+    assert "weight" not in columns
+    assert "unit" not in columns
+    assert Path(draft.image_path).is_file()
+    store.close()
+
+
 def test_idempotent_save_persists_capture_identity_and_returns_duplicate(tmp_path) -> None:
     store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
     frame = np.full((32, 48, 3), 17, dtype=np.uint8)
