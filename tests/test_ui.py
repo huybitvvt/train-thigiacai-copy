@@ -168,14 +168,18 @@ def test_capture_persist_without_ai_skips_quality_and_allows_empty_qr(tmp_path) 
     assert Path(saved.image_path).is_file()
 
 
-def test_ui_save_writes_to_db_without_waiting_for_ai() -> None:
-    assert "function persistRoundsToDb(" in TEST_UI_HTML
-    assert "body.persist_without_ai=true" in TEST_UI_HTML
-    assert "Đang lưu vào DB ngay, không chờ AI" in TEST_UI_HTML
+def test_ui_save_requires_photos_and_codes_after_ai_read() -> None:
+    assert "async function saveCapture()" in TEST_UI_HTML
+    assert "Cần đủ ảnh cân lõi và ảnh cân SP" in TEST_UI_HTML
+    assert "$('saveBtn').disabled=panelMode||busy||!completionReady(session)||!sourceChosen;" in TEST_UI_HTML
+    assert "Đang lưu từng mã SP thành từng dòng riêng" in TEST_UI_HTML
+    assert 'id="deferredDraftsCard"' not in TEST_UI_HTML
+    assert "Phiếu chờ AI đọc" not in TEST_UI_HTML
+    assert "loadDeferredDrafts" not in TEST_UI_HTML
+    assert "persistRoundsToDb" not in TEST_UI_HTML
+    assert "persist_without_ai" not in TEST_UI_HTML
     assert "api('/api/measurements?limit=100')" in TEST_UI_HTML
     assert "Chưa có bản ghi lần cân." in TEST_UI_HTML
-    assert "saveDeferredDraftToDb" in TEST_UI_HTML
-    assert "Lưu DB" in TEST_UI_HTML
     assert "sourceQuery()" in TEST_UI_HTML
     assert "'/api/measurements?limit=100&'+sourceQuery()" not in TEST_UI_HTML
 
@@ -1313,9 +1317,9 @@ def test_ui_uses_viet_nhat_red_black_roboto_branding() -> None:
 
 def test_ui_uses_camera_left_params_right_capture_layout() -> None:
     assert "main{width:100%;margin:18px 0;padding:0 18px 24px;display:block}" in TEST_UI_HTML
-    assert "grid-template-columns:minmax(460px,500px) minmax(0,1fr)" in TEST_UI_HTML
+    assert "grid-template-columns:minmax(640px,960px) minmax(0,1fr)" in TEST_UI_HTML
     assert "aspect-ratio:1/1" in TEST_UI_HTML
-    assert "width:min(100%,480px)" in TEST_UI_HTML
+    assert ".capture-left{min-width:0;max-width:960px;width:100%}" in TEST_UI_HTML
     assert 'class="capture-left"' in TEST_UI_HTML
     assert 'class="capture-right"' in TEST_UI_HTML
     assert '<aside class="card lookup-card">' not in TEST_UI_HTML
@@ -1801,7 +1805,8 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "if(isProduct&&!coreReady(session))" in TEST_UI_HTML
     assert "session._analyzeLock=false;renderControls();status(captureStatus,error.message" in TEST_UI_HTML
     assert "await api('/api/session/discard'" in TEST_UI_HTML
-    assert "if(!isProduct&&session.coreAnalysis&&session.analysisId)" in TEST_UI_HTML
+    assert "if(!isProduct&&targetRound===0&&(session.analysisId||session.hydratedPending||session.coreAnalysis))" in TEST_UI_HTML
+    assert "Phiên cũ còn kẹt" in TEST_UI_HTML
     assert 'id="analyzeCoreBtn"' in TEST_UI_HTML
     assert 'id="analyzeProductBtn"' in TEST_UI_HTML
     assert 'id="productWeight"' in TEST_UI_HTML
@@ -1813,9 +1818,10 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert 'id="productWeight" type="number" min="0" step="0.001" placeholder="AI tự đọc" readonly aria-readonly="true"' in TEST_UI_HTML
     assert "product_weight:productValue" in TEST_UI_HTML
     assert "normalizeProductWeight" in TEST_UI_HTML
-    assert "persist_without_ai=true" in TEST_UI_HTML
-    assert "function persistRoundsToDb(" in TEST_UI_HTML
-    assert "Cần đủ ảnh cân lõi và ảnh cân SP" not in TEST_UI_HTML
+    assert "Cần đủ ảnh cân lõi và ảnh cân SP" in TEST_UI_HTML
+    assert "persist_without_ai" not in TEST_UI_HTML
+    assert "persistRoundsToDb" not in TEST_UI_HTML
+    assert 'id="deferredDraftsCard"' not in TEST_UI_HTML
     assert "ẢNH ĐÃ GIỮ · CHƯA ĐỌC ĐƯỢC SỐ" in TEST_UI_HTML
     assert TEST_UI_HTML.count('<span class="kbd">Space</span>') == 3
     assert 'id="inventoryCaptureBtn"' in TEST_UI_HTML
@@ -1891,7 +1897,7 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "width:{ideal:1920}" in TEST_UI_HTML
     assert "height:{ideal:1080}" in TEST_UI_HTML
     assert "AI đọc toàn ảnh" in TEST_UI_HTML
-    assert "setInterval(()=>{if(workflowMode==='inventory')loadInventoryRecords();else{loadRecords();loadDeferredDrafts()}},15000)" in TEST_UI_HTML
+    assert "setInterval(()=>{if(workflowMode==='inventory')loadInventoryRecords();else{loadRecords()}},15000)" in TEST_UI_HTML
     assert "appStatus.release||'local'" in TEST_UI_HTML
     assert 'id="panelModeBtn"' in TEST_UI_HTML
     assert 'id="autoDetectPanelBtn"' in TEST_UI_HTML
@@ -1953,7 +1959,7 @@ def test_ui_weighs_multiple_rounds_with_split_second_table() -> None:
     assert "ROUND2_CORE=" in TEST_UI_HTML
     assert "evidence-round split" in TEST_UI_HTML
     assert "evidence-round split" in TEST_UI_HTML
-    assert "if(!isProduct&&session.coreAnalysis&&session.analysisId)" in TEST_UI_HTML
+    assert "if(!isProduct&&targetRound===0&&(session.analysisId||session.hydratedPending||session.coreAnalysis))" in TEST_UI_HTML
     assert "if(targetRound===0)" in TEST_UI_HTML
     assert "capture_kind:targetRound>0?'product':kind" in TEST_UI_HTML
     assert "syncedAll||(lastData&&lastData.sync_status==='synced')" not in TEST_UI_HTML
@@ -2083,10 +2089,10 @@ def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
         "session.deviceId&&!session.hasUnsavedReview()",
         "weight_frames:weightFrames",
         "captureWeightBurst(session)",
-        "capture_round:roundIndex",
         "product_weight:productValue",
-        "Nhập mã SP hoặc chụp ảnh trước khi lưu vào DB.",
+        "Cần đủ ảnh cân lõi và ảnh cân SP",
         "eventId:newEventId()",
+        "$('saveBtn').disabled=panelMode||busy||!completionReady(session)||!sourceChosen;",
         "event_id:round.eventId",
         "syncedAll",
         "function isTextEditingTarget(target)",
@@ -2098,6 +2104,8 @@ def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
         "className='slot-discard'",
     ):
         assert marker in TEST_UI_HTML
+    assert 'id="deferredDraftsCard"' not in TEST_UI_HTML
+    assert "Phiếu chờ AI đọc" not in TEST_UI_HTML
 
 
 def test_parser_auto_selects_gemini_only_when_key_exists_and_engine_is_omitted(
