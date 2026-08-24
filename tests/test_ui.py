@@ -1755,7 +1755,7 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "reliableQr=Boolean(data.qr_found&&!data.qr_conflict&&!qrDecoder.startsWith('gemini'))" in TEST_UI_HTML
     assert "if(reliableQr&&String(data.qr_code||'').trim()&&!String(session.qr||'').trim())session.qr=String(data.qr_code).trim()" in TEST_UI_HTML
     assert "$('analyzeCoreBtn').disabled=panelMode||busy||!ready" in TEST_UI_HTML
-    assert "$('analyzeProductBtn').disabled=panelMode||busy||!ready||!coreReady(session)" in TEST_UI_HTML
+    assert "$('analyzeProductBtn').disabled=panelMode||busy||!ready||!(coreReady(session)||hasCorePhoto(session))" in TEST_UI_HTML
     assert "$('analyzeCoreBtn').disabled=panelMode||busy||!ready||!sourceChosen" not in TEST_UI_HTML
     assert "function coreCaptured(session)" in TEST_UI_HTML
     assert "function sourceReady(session)" in TEST_UI_HTML
@@ -1770,12 +1770,12 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "analyzeCurrent('product')" in TEST_UI_HTML
     assert "PRODUCT_WEIGHT=" in TEST_UI_HTML
     assert "function productReady(session)" in TEST_UI_HTML
-    assert "DEFAULT_CORE_WEIGHT=1.02" in TEST_UI_HTML
-    assert 'id="weight" type="number" min="0" step="0.001" value="1.02" placeholder="1.02"' in TEST_UI_HTML
-    assert 'id="productWeight" type="number" min="0" step="0.001" placeholder="Nhập hoặc AI / để trống=0"' in TEST_UI_HTML
+    assert 'id="weight" type="number" min="0" step="0.001" placeholder="AI tự đọc" readonly aria-readonly="true"' in TEST_UI_HTML
+    assert 'id="productWeight" type="number" min="0" step="0.001" placeholder="AI tự đọc" readonly aria-readonly="true"' in TEST_UI_HTML
     assert "product_weight:productValue" in TEST_UI_HTML
-    assert "IMAGE_SOURCE=NONE" in TEST_UI_HTML
-    assert "ảnh không bắt buộc" in TEST_UI_HTML
+    assert "normalizeProductWeight" in TEST_UI_HTML
+    assert "Cần đủ ảnh cân lõi và ảnh cân SP" in TEST_UI_HTML
+    assert "ẢNH ĐÃ GIỮ · CHƯA ĐỌC ĐƯỢC SỐ" in TEST_UI_HTML
     assert TEST_UI_HTML.count('<span class="kbd">Space</span>') == 3
     assert 'id="inventoryCaptureBtn"' in TEST_UI_HTML
     assert 'class="workflow-tabs" role="tablist"' in TEST_UI_HTML
@@ -2018,14 +2018,14 @@ def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
         "ensureCamerasForSelect()",
         "ensureCameraPermission()",
         "session.stream!==stream||session.streamGeneration!==generation",
-        "ĐỦ ĐỂ LƯU · ",
+        "ĐỦ ẢNH + MÃ SP · ",
         "prepareNextCapture('',session)",
         "'awaiting-code'",
         "'awaiting-weight'",
         "function completionReady(session)",
         "function sourceReady(session)",
         "function productReady(session)",
-        "DEFAULT_CORE_WEIGHT=1.02",
+        "normalizeProductWeight",
         'id="analyzeCoreBtn"',
         'id="analyzeProductBtn"',
         'id="productWeight"',
@@ -2044,7 +2044,7 @@ def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
         "captureWeightBurst(session)",
         "capture_round:roundIndex",
         "product_weight:productValue",
-        "IMAGE_SOURCE=NONE",
+        "Cần đủ ảnh cân lõi và ảnh cân SP",
         "eventId:newEventId()",
         "event_id:round.eventId",
         "syncedAll",

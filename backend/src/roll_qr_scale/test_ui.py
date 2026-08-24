@@ -2523,7 +2523,6 @@ class StationUIService:
         allow_missing_image: bool = False,
         skip_quality: bool = False,
         allow_empty_qr: bool = False,
-        product_frame: np.ndarray | None = None,
     ) -> dict[str, object]:
         qr_code = qr_code.strip()
         if not qr_code and product_frame is not None:
@@ -3983,6 +3982,7 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                             if weight_raw
                             else "IMAGE_SOURCE=NONE"
                         )
+                    persist_without_ai = bool(payload.get("persist_without_ai"))
                     result = service.capture(
                         str(payload.get("qr_code", "")),
                         weight,
@@ -4006,6 +4006,8 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         if payload.get("frame_sha256")
                         else None,
                         allow_missing_image=allow_missing_image,
+                        skip_quality=persist_without_ai,
+                        allow_empty_qr=persist_without_ai,
                     )
                     self.send_json(201, result)
                     return
