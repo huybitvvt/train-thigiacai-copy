@@ -141,6 +141,45 @@ def test_ui_save_reports_cloud_failure_but_keeps_complete_local_event(tmp_path) 
     assert Path(saved.image_path).is_file()
 
 
+def test_capture_persist_without_ai_skips_quality_and_allows_empty_qr(tmp_path) -> None:
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(store, None, None, None)
+    dark = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    result = service.capture(
+        "",
+        0.0,
+        "kg",
+        dark,
+        False,
+        "SOURCE_PRODUCTION_ORDER=LSX-DH060",
+        skip_quality=True,
+        allow_empty_qr=True,
+        product_frame=dark,
+    )
+    saved = store.get(str(result["event_id"]))
+
+    service.close()
+    store.close()
+    assert result["ok"] is True
+    assert saved is not None
+    assert saved.qr_code == ""
+    assert saved.weight == pytest.approx(0.0)
+    assert Path(saved.image_path).is_file()
+
+
+def test_ui_save_writes_to_db_without_waiting_for_ai() -> None:
+    assert "function persistRoundsToDb(" in TEST_UI_HTML
+    assert "body.persist_without_ai=true" in TEST_UI_HTML
+    assert "Đang lưu vào DB ngay, không chờ AI" in TEST_UI_HTML
+    assert "api('/api/measurements?limit=100')" in TEST_UI_HTML
+    assert "Chưa có bản ghi lần cân." in TEST_UI_HTML
+    assert "saveDeferredDraftToDb" in TEST_UI_HTML
+    assert "Lưu DB" in TEST_UI_HTML
+    assert "sourceQuery()" in TEST_UI_HTML
+    assert "'/api/measurements?limit=100&'+sourceQuery()" not in TEST_UI_HTML
+
+
 def test_ui_retry_with_fixed_unbound_event_id_does_not_duplicate(tmp_path) -> None:
     store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
     service = StationUIService(store, None, None, None)
@@ -1774,7 +1813,9 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert 'id="productWeight" type="number" min="0" step="0.001" placeholder="AI tự đọc" readonly aria-readonly="true"' in TEST_UI_HTML
     assert "product_weight:productValue" in TEST_UI_HTML
     assert "normalizeProductWeight" in TEST_UI_HTML
-    assert "Cần đủ ảnh cân lõi và ảnh cân SP" in TEST_UI_HTML
+    assert "persist_without_ai=true" in TEST_UI_HTML
+    assert "function persistRoundsToDb(" in TEST_UI_HTML
+    assert "Cần đủ ảnh cân lõi và ảnh cân SP" not in TEST_UI_HTML
     assert "ẢNH ĐÃ GIỮ · CHƯA ĐỌC ĐƯỢC SỐ" in TEST_UI_HTML
     assert TEST_UI_HTML.count('<span class="kbd">Space</span>') == 3
     assert 'id="inventoryCaptureBtn"' in TEST_UI_HTML
@@ -2044,7 +2085,7 @@ def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
         "captureWeightBurst(session)",
         "capture_round:roundIndex",
         "product_weight:productValue",
-        "Cần đủ ảnh cân lõi và ảnh cân SP",
+        "Nhập mã SP hoặc chụp ảnh trước khi lưu vào DB.",
         "eventId:newEventId()",
         "event_id:round.eventId",
         "syncedAll",
