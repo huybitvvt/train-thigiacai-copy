@@ -40,8 +40,10 @@ from .capture_gate import frame_fingerprint
 from .api_client import (
     fetch_remote_json,
     fetch_remote_measurements,
+    fetch_supabase_photo_draft_parent_ids,
     fetch_supabase_rows,
     fetch_supabase_table,
+    fetch_supabase_table_count,
     persist_product_evidence,
     sign_storage_image,
 )
@@ -978,6 +980,76 @@ def _local_measurement_items(
         if len(items) >= limit:
             break
     return items
+
+
+def _local_measurement_event_ids(
+    store: MeasurementStore,
+    *,
+    work_date: str = "",
+    shift: str = "",
+    machine: str = "",
+    production_order: str = "",
+    unsynced_only: bool = False,
+) -> set[str]:
+    event_ids: set[str] = set()
+    for item in store.measurement_source_rows():
+        if unsynced_only and str(item.get("sync_status") or "") == "synced":
+            continue
+        if _matches_source_filters(
+            item,
+            work_date=work_date,
+            shift=shift,
+            machine=machine,
+            production_order=production_order,
+        ):
+            event_id = str(item.get("event_id") or "").strip()
+            if event_id:
+                event_ids.add(event_id)
+    return event_ids
+
+
+def _local_measurement_count(
+    store: MeasurementStore,
+    **filters: object,
+) -> int:
+    return len(_local_measurement_event_ids(store, **filters))
+
+
+def _local_error_parent_ids(
+    store: MeasurementStore,
+    *,
+    work_date: str = "",
+    shift: str = "",
+    machine: str = "",
+    production_order: str = "",
+    unsynced_only: bool = False,
+) -> set[str]:
+    parent_ids: set[str] = set()
+    for item in store.photo_draft_source_rows():
+        if unsynced_only and str(item.get("sync_status") or "") == "synced":
+            continue
+        if _matches_source_filters(
+            item,
+            work_date=work_date,
+            shift=shift,
+            machine=machine,
+            production_order=production_order,
+        ):
+            parent_id = str(
+                item.get("parent_event_id") or item.get("event_id") or ""
+            ).strip()
+            if parent_id:
+                parent_ids.add(parent_id)
+    return parent_ids
+
+
+def _local_production_counts(
+    store: MeasurementStore,
+    **filters: object,
+) -> tuple[int, int]:
+    measurement_ids = _local_measurement_event_ids(store, **filters)
+    error_ids = _local_error_parent_ids(store, **filters) - measurement_ids
+    return len(measurement_ids | error_ids), len(error_ids)
 
 
 def _local_inventory_items(
@@ -3418,6 +3490,13 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                 shift = str(query.get("shift", [""])[0]).strip()
                 machine = str(query.get("machine", [""])[0]).strip()
                 production_order = str(query.get("production_order", [""])[0]).strip()
+                local_total_count, local_error_count = _local_production_counts(
+                    store,
+                    work_date=work_date,
+                    shift=shift,
+                    machine=machine,
+                    production_order=production_order,
+                )
                 supabase_url = _supabase_project_url()
                 publishable_key = _supabase_read_key()
                 if not supabase_url or not publishable_key:
@@ -3430,6 +3509,9 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                             "shift": shift,
                             "machine": machine,
                             "production_order": production_order,
+                            "total_count": local_total_count,
+                            "error_count": local_error_count,
+                            "count_exact": True,
                             "items": _local_measurement_items(
                                 store,
                                 limit,
@@ -3459,6 +3541,9 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                             "shift": shift,
                             "machine": machine,
                             "production_order": production_order,
+                            "total_count": local_total_count,
+                            "error_count": local_error_count,
+                            "count_exact": True,
                             "items": _local_measurement_items(
                                 store,
                                 limit,
@@ -3470,6 +3555,34 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         },
                     )
                     return
+                count_error = ""
+                try:
+                    remote_total_count = fetch_supabase_table_count(
+                        supabase_url,
+                        publishable_key,
+                        work_date=work_date,
+                        shift=shift,
+                        machine=machine,
+                        production_order=production_order,
+                    )
+                except Exception as exc:
+                    remote_total_count = None
+                    count_error = str(exc)
+                remote_error_parent_ids: set[str] | None
+                try:
+                    remote_error_parent_ids = fetch_supabase_photo_draft_parent_ids(
+                        supabase_url,
+                        publishable_key,
+                        work_date=work_date,
+                        shift=shift,
+                        machine=machine,
+                        production_order=production_order,
+                    )
+                except Exception as exc:
+                    remote_error_parent_ids = None
+                    count_error = "; ".join(
+                        value for value in (count_error, str(exc)) if value
+                    )
                 items = []
                 for item in remote_items:
                     core_url = item.get("core_image_url") or item.get("image_url")
@@ -3540,6 +3653,38 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         items.append(payload)
                     if len(items) >= limit:
                         break
+                filters = {
+                    "work_date": work_date,
+                    "shift": shift,
+                    "machine": machine,
+                    "production_order": production_order,
+                }
+                local_measurement_ids = _local_measurement_event_ids(store, **filters)
+                local_unsynced_measurement_ids = _local_measurement_event_ids(
+                    store,
+                    **filters,
+                    unsynced_only=True,
+                )
+                local_unsynced_error_ids = (
+                    _local_error_parent_ids(store, **filters, unsynced_only=True)
+                    - local_measurement_ids
+                )
+                error_parent_ids = (
+                    remote_error_parent_ids | local_unsynced_error_ids
+                    if remote_error_parent_ids is not None
+                    else _local_error_parent_ids(store, **filters) - local_measurement_ids
+                )
+                error_count = len(error_parent_ids)
+                measurement_count = (
+                    remote_total_count + len(local_unsynced_measurement_ids)
+                    if remote_total_count is not None
+                    else max(_local_measurement_count(store, **filters), len(items))
+                )
+                count_exact = (
+                    remote_total_count is not None
+                    and remote_error_parent_ids is not None
+                )
+                total_count = measurement_count + error_count
                 self.send_json(
                     200,
                     {
@@ -3549,6 +3694,10 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         "shift": shift,
                         "machine": machine,
                         "production_order": production_order,
+                        "total_count": total_count,
+                        "error_count": error_count,
+                        "count_exact": count_exact,
+                        "count_error": count_error or None,
                         "items": items,
                     },
                 )
@@ -3898,7 +4047,12 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     self.send_json(201, result)
                     return
                 self.send_json(404, {"ok": False, "error": "not_found"})
-            except (SessionConflictError, AnalysisBindingMismatch, EventIdConflictError) as exc:
+            except EventIdConflictError as exc:
+                self.send_json(
+                    409,
+                    {"ok": False, "error": "event_id_conflict", "message": str(exc)},
+                )
+            except (SessionConflictError, AnalysisBindingMismatch) as exc:
                 self.send_json(409, {"ok": False, "error": "session_conflict", "message": str(exc)})
             except InferenceQueueFull as exc:
                 self.send_json(503, {"ok": False, "error": "inference_queue_full", "message": str(exc)})

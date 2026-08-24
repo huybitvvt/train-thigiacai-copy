@@ -85,6 +85,9 @@ def test_photo_draft_saves_image_without_weight_or_required_qr(tmp_path) -> None
         "SELECT COUNT(*) FROM photo_drafts WHERE parent_event_id = ?",
         (draft.parent_event_id,),
     ).fetchone()[0] == 2
+    source_rows = store.photo_draft_source_rows()
+    assert {row["event_id"] for row in source_rows} == {draft.event_id, sibling.event_id}
+    assert {row["parent_event_id"] for row in source_rows} == {draft.parent_event_id}
     assert draft.status == "awaiting_ai"
     assert draft.sync_status == "pending"
     assert "weight" not in columns

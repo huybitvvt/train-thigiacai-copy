@@ -109,6 +109,104 @@ def fetch_supabase_table(
     return [item for item in parsed if isinstance(item, dict)]
 
 
+def fetch_supabase_table_count(
+    supabase_url: str,
+    publishable_key: str,
+    *,
+    work_date: str = "",
+    shift: str = "",
+    machine: str = "",
+    production_order: str = "",
+    timeout: float = 10.0,
+) -> int:
+    """Return an exact count for the selected production source filters."""
+
+    params = {"select": "event_id", "limit": 1}
+    for field, value in (
+        ("work_date", work_date),
+        ("shift", shift),
+        ("machine", machine),
+        ("production_order", production_order),
+    ):
+        selected = str(value or "").strip()
+        if selected:
+            params[f"metadata->>{field}"] = f"eq.{selected}"
+    query = urllib.parse.urlencode(params)
+    request = urllib.request.Request(
+        f"{supabase_url.rstrip('/')}/rest/v1/can_tu_dong?{query}",
+        headers={
+            "Accept": "application/json",
+            "apikey": publishable_key,
+            "Authorization": f"Bearer {publishable_key}",
+            "Prefer": "count=exact",
+            "Range-Unit": "items",
+            "Range": "0-0",
+        },
+        method="GET",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        content_range = str(response.headers.get("Content-Range", ""))
+    if "/" not in content_range:
+        raise RuntimeError("Supabase count response has no Content-Range")
+    total = content_range.rsplit("/", 1)[-1]
+    if not total.isdigit():
+        raise RuntimeError("Supabase count response is invalid")
+    return int(total)
+
+
+def fetch_supabase_photo_draft_parent_ids(
+    supabase_url: str,
+    service_key: str,
+    *,
+    work_date: str = "",
+    shift: str = "",
+    machine: str = "",
+    production_order: str = "",
+    timeout: float = 10.0,
+) -> set[str]:
+    """Return distinct production events whose unreadable photos were saved."""
+
+    parent_ids: set[str] = set()
+    page_size = 1000
+    for page in range(50):
+        params: dict[str, object] = {
+            "select": "parent_event_id,event_id",
+            "limit": page_size,
+            "offset": page * page_size,
+        }
+        for field, value in (
+            ("work_date", work_date),
+            ("shift", shift),
+            ("machine", machine),
+            ("production_order", production_order),
+        ):
+            selected = str(value or "").strip()
+            if selected:
+                params[field] = f"eq.{selected}"
+        query = urllib.parse.urlencode(params)
+        request = urllib.request.Request(
+            f"{supabase_url.rstrip('/')}/rest/v1/anh_can_cho_ai?{query}",
+            headers={
+                "Accept": "application/json",
+                "apikey": service_key,
+                "Authorization": f"Bearer {service_key}",
+            },
+            method="GET",
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            parsed = json.loads(response.read().decode("utf-8"))
+        if not isinstance(parsed, list):
+            raise RuntimeError("Supabase anh_can_cho_ai response is invalid")
+        rows = [item for item in parsed if isinstance(item, dict)]
+        for item in rows:
+            parent_id = str(item.get("parent_event_id") or item.get("event_id") or "").strip()
+            if parent_id:
+                parent_ids.add(parent_id)
+        if len(rows) < page_size:
+            return parent_ids
+    raise RuntimeError("Supabase saved-error count exceeds the safe page limit")
+
+
 def persist_product_evidence(
     supabase_url: str,
     service_key: str,

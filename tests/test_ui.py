@@ -42,19 +42,17 @@ def test_decode_image_accepts_browser_data_url() -> None:
     assert decoded.shape == frame.shape
 
 
-def test_photo_only_button_is_independent_from_ai_and_next_to_discard() -> None:
-    photo_position = TEST_UI_HTML.index('id="photoOnlyBtn"')
-    discard_position = TEST_UI_HTML.index('id="discardBtn"')
-    assert photo_position < discard_position
-    assert "function capturePhotoOnly()" in TEST_UI_HTML
+def test_photo_only_and_factory_buttons_are_removed_from_operator_view() -> None:
+    assert "#photoOnlyBtn,#factoryBtn,#inventoryPhoneBtn{display:none!important}" in TEST_UI_HTML
     assert "'/api/photo-capture'" in TEST_UI_HTML
-    assert "client_qr_code:clientQr" in TEST_UI_HTML
-    assert "event_id:captureId,parent_event_id:eventId" in TEST_UI_HTML
-    assert "capture_kind:slot.kind,capture_round:slot.round" in TEST_UI_HTML
-    assert "EVENT PHIẾU CÂN:" in TEST_UI_HTML
-    assert "ĐÃ CHỤP ẢNH · KHÔNG GỌI AI" in TEST_UI_HTML
-    assert "bindActionButton('photoOnlyBtn',()=>capturePhotoOnly())" in TEST_UI_HTML
-    assert "console.warn('Không dọn được phiên backend, vẫn bỏ ảnh local:'" in TEST_UI_HTML
+    assert "function persistFailedImage(" in TEST_UI_HTML
+    assert "function saveFailedRound(" in TEST_UI_HTML
+    assert "function saveMeasurementRound(" in TEST_UI_HTML
+    assert "saveCapture=saveCaptureWithFailedImages" in TEST_UI_HTML
+    assert "round.eventId=newEventId()" in TEST_UI_HTML
+    assert "Nhấn Enter để lưu ảnh với số trống" in TEST_UI_HTML
+    assert "ID ảnh sẽ được tự tạo an toàn" in TEST_UI_HTML
+    assert "error_saved:true" in TEST_UI_HTML
 
 
 def test_ui_capture_decodes_qr_and_saves_stable_manual_weight(tmp_path) -> None:
@@ -1458,6 +1456,105 @@ def test_production_orders_follow_selected_date() -> None:
     )
 
 
+def test_local_measurement_count_uses_all_source_filters_without_display_limit() -> None:
+    matching_raw = (
+        "SOURCE_DATE=2026-08-24; SOURCE_SHIFT=12C2; "
+        "SOURCE_MACHINE=Máy cách nhiệt; SOURCE_PRODUCTION_ORDER=LSX-DH061"
+    )
+    rows = [
+        {
+            "event_id": f"synced-{index}",
+            "captured_at": "2026-08-24T18:00:00+07:00",
+            "weight_raw": matching_raw,
+            "sync_status": "synced",
+        }
+        for index in range(205)
+    ]
+    rows.extend(
+        {
+            "event_id": f"pending-{index}",
+            "captured_at": "2026-08-24T18:01:00+07:00",
+            "weight_raw": matching_raw,
+            "sync_status": "pending",
+        }
+        for index in range(3)
+    )
+    rows.append(
+        {
+            "event_id": "wrong-machine",
+            "captured_at": "2026-08-24T18:02:00+07:00",
+            "weight_raw": matching_raw.replace("Máy cách nhiệt", "Máy tái chế"),
+            "sync_status": "pending",
+        }
+    )
+
+    class FakeStore:
+        def measurement_source_rows(self) -> list[dict[str, object]]:
+            return rows
+
+        def photo_draft_source_rows(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "event_id": "error-core",
+                    "parent_event_id": "error-parent",
+                    "captured_at": "2026-08-24T18:03:00+07:00",
+                    "work_date": "2026-08-24",
+                    "shift": "12C2",
+                    "machine": "Máy cách nhiệt",
+                    "production_order": "LSX-DH061",
+                    "sync_status": "pending",
+                },
+                {
+                    "event_id": "error-product",
+                    "parent_event_id": "error-parent",
+                    "captured_at": "2026-08-24T18:03:01+07:00",
+                    "work_date": "2026-08-24",
+                    "shift": "12C2",
+                    "machine": "Máy cách nhiệt",
+                    "production_order": "LSX-DH061",
+                    "sync_status": "pending",
+                },
+                {
+                    "event_id": "already-counted-photo",
+                    "parent_event_id": "synced-0",
+                    "captured_at": "2026-08-24T18:03:02+07:00",
+                    "work_date": "2026-08-24",
+                    "shift": "12C2",
+                    "machine": "Máy cách nhiệt",
+                    "production_order": "LSX-DH061",
+                    "sync_status": "synced",
+                },
+            ]
+
+    filters = {
+        "work_date": "2026-08-24",
+        "shift": "12C2",
+        "machine": "Máy cách nhiệt",
+        "production_order": "LSX-DH061",
+    }
+    assert test_ui_module._local_measurement_count(FakeStore(), **filters) == 208
+    assert (
+        test_ui_module._local_measurement_count(
+            FakeStore(), **filters, unsynced_only=True
+        )
+        == 3
+    )
+    assert test_ui_module._local_production_counts(FakeStore(), **filters) == (209, 1)
+
+
+def test_shift_count_is_visible_and_refreshes_after_save_and_filter_changes() -> None:
+    assert 'id="shiftCount"' in TEST_UI_HTML
+    assert 'id="shiftCountValue"' in TEST_UI_HTML
+    assert "Số lượng trong ca" in TEST_UI_HTML
+    assert "data.total_count" in TEST_UI_HTML
+    assert "data.error_count" in TEST_UI_HTML
+    assert 'id="shiftCountDetail"' in TEST_UI_HTML
+    assert "Theo Ngày · Ca · Máy · Lệnh sản xuất" in TEST_UI_HTML
+    assert "session.captureCount+=savedNow;await loadRecords()" in TEST_UI_HTML
+    assert "await loadProductionOrders(fields.date,'');await loadRecords()" in TEST_UI_HTML
+    assert "persistSourceFromFields();renderControls();loadRecords()" in TEST_UI_HTML
+
+
 def test_production_orders_read_master_table_rows() -> None:
     rows = [
         {"ma_lsx": "LSX-A", "ngay": "01/07/2026", "ca": "12C1"},
@@ -1857,7 +1954,8 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "await api('/api/session/discard'" in TEST_UI_HTML
     assert "retryingFailedCore=!isProduct&&targetRound===0&&session.state==='error'&&Boolean(session.eventId)" in TEST_UI_HTML
     assert "if(retryingFailedCore&&round.eventId===discardedEventId)round.eventId=null" in TEST_UI_HTML
-    assert "Bấm chụp lại; hệ thống sẽ dọn event lỗi và tạo event mới." in TEST_UI_HTML
+    assert "Nhấn Enter để lưu ảnh với số trống" in TEST_UI_HTML
+    assert "ID ảnh sẽ được tự tạo an toàn" in TEST_UI_HTML
     assert 'id="analyzeCoreBtn"' in TEST_UI_HTML
     assert 'id="analyzeProductBtn"' in TEST_UI_HTML
     assert 'id="productWeight"' in TEST_UI_HTML
@@ -1903,6 +2001,7 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "function wantsInventoryMode(" in TEST_UI_HTML
     assert "/kiem-kho" in TEST_UI_HTML
     assert "analyzeInventory()" in TEST_UI_HTML
+    assert "if(!session.stream){await openDefaultCamera(session);if(!session.stream)return}" in TEST_UI_HTML
     assert "function captureInventoryPhoto(" in TEST_UI_HTML
     assert "function nextCaptureKind(" in TEST_UI_HTML
     assert "captureNextWeight()" in TEST_UI_HTML

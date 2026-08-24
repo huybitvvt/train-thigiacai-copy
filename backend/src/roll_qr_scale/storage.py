@@ -839,6 +839,27 @@ class MeasurementStore:
             ).fetchall()
         return [self._from_row(row) for row in rows]
 
+    def measurement_source_rows(self) -> list[dict[str, object]]:
+        """Return lightweight source fields for exact filtered measurement counts."""
+
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT event_id, captured_at, weight_raw, sync_status "
+                "FROM measurements ORDER BY id DESC"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def photo_draft_source_rows(self) -> list[dict[str, object]]:
+        """Return lightweight saved-error fields for exact production counts."""
+
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT event_id, parent_event_id, captured_at, work_date, shift, "
+                "machine, production_order, sync_status FROM photo_drafts "
+                "ORDER BY id DESC"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def attach_product_image(self, event_id: str, frame: np.ndarray) -> str:
         """Persist the product-weight evidence beside its core-weight event."""
         encoded_ok, encoded_frame = cv2.imencode(".jpg", frame)
