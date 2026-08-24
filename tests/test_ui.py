@@ -1855,7 +1855,9 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "if(isProduct&&!coreReady(session))" in TEST_UI_HTML
     assert "session._analyzeLock=false;renderControls();status(captureStatus,error.message" in TEST_UI_HTML
     assert "await api('/api/session/discard'" in TEST_UI_HTML
-    assert "if(!isProduct&&session.coreAnalysis&&session.analysisId)" in TEST_UI_HTML
+    assert "retryingFailedCore=!isProduct&&targetRound===0&&session.state==='error'&&Boolean(session.eventId)" in TEST_UI_HTML
+    assert "if(retryingFailedCore&&round.eventId===discardedEventId)round.eventId=null" in TEST_UI_HTML
+    assert "Bấm chụp lại; hệ thống sẽ dọn event lỗi và tạo event mới." in TEST_UI_HTML
     assert 'id="analyzeCoreBtn"' in TEST_UI_HTML
     assert 'id="analyzeProductBtn"' in TEST_UI_HTML
     assert 'id="productWeight"' in TEST_UI_HTML
@@ -2002,7 +2004,7 @@ def test_ui_weighs_multiple_rounds_with_split_second_table() -> None:
     assert "ROUND2_CORE=" in TEST_UI_HTML
     assert "evidence-round split" in TEST_UI_HTML
     assert "evidence-round split" in TEST_UI_HTML
-    assert "if(!isProduct&&session.coreAnalysis&&session.analysisId)" in TEST_UI_HTML
+    assert "session.eventId&&(retryingFailedCore||session.coreAnalysis&&session.analysisId)" in TEST_UI_HTML
     assert "if(targetRound===0)" in TEST_UI_HTML
     assert "capture_kind:targetRound>0?'product':kind" in TEST_UI_HTML
     assert "$('addRoundBtn').addEventListener('click'" in TEST_UI_HTML

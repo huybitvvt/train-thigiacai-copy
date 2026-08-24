@@ -77,6 +77,38 @@ def test_station_does_not_overwrite_unsaved_review_and_releases_after_save(tmp_p
     assert second.analysis_id != first.analysis_id
 
 
+def test_failed_analysis_is_discarded_before_retrying_with_a_new_frame(tmp_path) -> None:
+    registry = StationSessionRegistry(tmp_path / "staging", ["station-01"])
+    registry.configure_camera("station-01", "camera-01")
+    first_event_id = str(uuid.uuid4())
+    first = registry.stage(
+        np.full((480, 640, 3), 170, dtype=np.uint8),
+        event_id=first_event_id,
+        station_id="station-01",
+        camera_id="camera-01",
+    )
+    registry.mark_failed(first.analysis_id, RuntimeError("AI failed"))
+
+    with pytest.raises(AnalysisBindingMismatch, match="cùng event_id"):
+        registry.stage(
+            np.full((480, 640, 3), 190, dtype=np.uint8),
+            event_id=first_event_id,
+            station_id="station-01",
+            camera_id="camera-01",
+        )
+
+    assert registry.discard("station-01", event_id=first_event_id) is True
+    retry = registry.stage(
+        np.full((480, 640, 3), 190, dtype=np.uint8),
+        event_id=str(uuid.uuid4()),
+        station_id="station-01",
+        camera_id="camera-01",
+    )
+
+    assert retry.analysis_id != first.analysis_id
+    assert retry.event_id != first.event_id
+
+
 def test_registry_rejects_duplicate_configured_camera_identity(tmp_path) -> None:
     registry = StationSessionRegistry(tmp_path / "staging", ["station-01", "station-02"])
     registry.configure_camera("station-01", "camera-shared")
