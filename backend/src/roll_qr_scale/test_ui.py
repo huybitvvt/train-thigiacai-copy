@@ -1789,6 +1789,9 @@ class StationUIService:
         *,
         client_qr_code: str = "",
         event_id: str | None = None,
+        parent_event_id: str = "",
+        capture_kind: str = "core",
+        capture_round: int = 0,
         station_id: str = "",
         camera_id: str = "",
         work_date: str = "",
@@ -1805,6 +1808,18 @@ class StationUIService:
             raise ValueError("event_id ảnh chờ không hợp lệ") from exc
         if parsed_event_id.version != 4:
             raise ValueError("event_id ảnh chờ phải là UUID v4")
+        parent_event_id = parent_event_id.strip() or event_id
+        try:
+            parsed_parent_event_id = uuid.UUID(parent_event_id)
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise ValueError("event_id phiếu cân không hợp lệ") from exc
+        if parsed_parent_event_id.version != 4:
+            raise ValueError("event_id phiếu cân phải là UUID v4")
+        capture_kind = capture_kind.strip().lower()
+        if capture_kind not in {"core", "product"}:
+            raise ValueError("Ô ảnh phải là cân lõi hoặc cân sản phẩm")
+        if not 0 <= capture_round <= 3:
+            raise ValueError("Lần cân phải từ 1 đến 4")
         configured = {
             (str(item["station_id"]), str(item["camera_id"]))
             for item in self.station_configs
@@ -1841,6 +1856,9 @@ class StationUIService:
             qr_source=qr_source,
             needs_sync=self.sync_worker is not None,
             event_id=event_id,
+            parent_event_id=parent_event_id,
+            capture_kind=capture_kind,
+            capture_round=capture_round,
             work_date=work_date,
             shift=shift,
             machine=machine,
@@ -1855,7 +1873,10 @@ class StationUIService:
         return {
             "ok": True,
             "id": current.id,
-            "event_id": current.event_id,
+            "event_id": current.parent_event_id,
+            "capture_id": current.event_id,
+            "capture_kind": current.capture_kind,
+            "capture_round": current.capture_round,
             "workflow": "photo_draft",
             "status": current.status,
             "duplicate": duplicate,
@@ -3713,6 +3734,9 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         frame,
                         client_qr_code=str(payload.get("client_qr_code", "")),
                         event_id=str(payload.get("event_id", "")) or None,
+                        parent_event_id=str(payload.get("parent_event_id", "")),
+                        capture_kind=str(payload.get("capture_kind", "core")),
+                        capture_round=int(payload.get("capture_round", 0)),
                         station_id=str(payload.get("station_id", "")),
                         camera_id=str(payload.get("camera_id", "")),
                         work_date=str(payload.get("work_date", "")),

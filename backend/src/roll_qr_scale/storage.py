@@ -148,6 +148,9 @@ class PhotoDraft:
 
     id: int
     event_id: str
+    parent_event_id: str
+    capture_kind: str
+    capture_round: int
     qr_code: str
     captured_at: str
     image_path: str
@@ -186,6 +189,8 @@ class PhotoDraft:
         effective_gateway_id = self.gateway_id or device_id
         for optional_field in (
             "qr_code",
+            "parent_event_id",
+            "capture_kind",
             "work_date",
             "shift",
             "machine",
@@ -315,6 +320,9 @@ class MeasurementStore:
             CREATE TABLE IF NOT EXISTS photo_drafts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 event_id TEXT NOT NULL UNIQUE,
+                parent_event_id TEXT NOT NULL DEFAULT '',
+                capture_kind TEXT NOT NULL DEFAULT 'core',
+                capture_round INTEGER NOT NULL DEFAULT 0,
                 qr_code TEXT NOT NULL DEFAULT '',
                 captured_at TEXT NOT NULL,
                 image_path TEXT NOT NULL,
@@ -406,6 +414,25 @@ class MeasurementStore:
                 self.connection.execute(
                     f"ALTER TABLE measurements ADD COLUMN {column} {definition}"
                 )
+
+        photo_existing = {
+            str(row["name"])
+            for row in self.connection.execute("PRAGMA table_info(photo_drafts)").fetchall()
+        }
+        photo_additions = {
+            "parent_event_id": "TEXT NOT NULL DEFAULT ''",
+            "capture_kind": "TEXT NOT NULL DEFAULT 'core'",
+            "capture_round": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for column, definition in photo_additions.items():
+            if column not in photo_existing:
+                self.connection.execute(
+                    f"ALTER TABLE photo_drafts ADD COLUMN {column} {definition}"
+                )
+        self.connection.execute(
+            "UPDATE photo_drafts SET parent_event_id = event_id "
+            "WHERE parent_event_id = ''"
+        )
 
         # Backfill structured product weight from captures made before the
         # dedicated column existed. Do not guess rows without this exact tag.
@@ -551,6 +578,9 @@ class MeasurementStore:
     @staticmethod
     def _calculate_photo_draft_payload_hash(
         *,
+        parent_event_id: str,
+        capture_kind: str,
+        capture_round: int,
         qr_code: str,
         qr_source: str,
         captured_at: str,
@@ -565,10 +595,13 @@ class MeasurementStore:
     ) -> str:
         immutable_payload = {
             "camera_id": camera_id,
+            "capture_kind": capture_kind,
+            "capture_round": capture_round,
             "captured_at": captured_at,
             "frame_sha256": frame_sha256,
             "gateway_id": gateway_id,
             "machine": machine,
+            "parent_event_id": parent_event_id,
             "production_order": production_order,
             "qr_code": qr_code,
             "qr_source": qr_source,
@@ -1185,6 +1218,9 @@ class MeasurementStore:
         qr_source: str = "none",
         needs_sync: bool = False,
         event_id: str | None = None,
+        parent_event_id: str = "",
+        capture_kind: str = "core",
+        capture_round: int = 0,
         captured_at: str | None = None,
         work_date: str = "",
         shift: str = "",
@@ -1198,6 +1234,11 @@ class MeasurementStore:
         if len(qr_code) > 512 or any(ord(character) < 32 for character in qr_code):
             raise ValueError("QR must be empty or contain at most 512 printable characters")
         event_id = event_id or str(uuid.uuid4())
+        parent_event_id = parent_event_id.strip() or event_id
+        if capture_kind not in {"core", "product"}:
+            raise ValueError("Photo capture kind must be core or product")
+        if not 0 <= capture_round <= 3:
+            raise ValueError("Photo capture round must be between 0 and 3")
         if captured_at is None:
             existing_draft = self.get_photo_draft(event_id)
             if existing_draft is not None:
@@ -1211,6 +1252,9 @@ class MeasurementStore:
         jpeg_bytes = encoded_frame.tobytes()
         frame_sha256 = hashlib.sha256(jpeg_bytes).hexdigest()
         payload_hash = self._calculate_photo_draft_payload_hash(
+            parent_event_id=parent_event_id,
+            capture_kind=capture_kind,
+            capture_round=capture_round,
             qr_code=qr_code,
             qr_source=qr_source,
             captured_at=captured_at,
@@ -1248,14 +1292,18 @@ class MeasurementStore:
                 self.connection.execute(
                     """
                     INSERT INTO photo_drafts (
-                        event_id, qr_code, captured_at, image_path, qr_source,
+                        event_id, parent_event_id, capture_kind, capture_round,
+                        qr_code, captured_at, image_path, qr_source,
                         work_date, shift, machine, production_order, status,
                         sync_status, gateway_id, station_id, camera_id,
                         frame_sha256, payload_hash
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_ai', ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_ai', ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         event_id,
+                        parent_event_id,
+                        capture_kind,
+                        capture_round,
                         qr_code,
                         captured_at,
                         str(image_path.resolve()),
@@ -1272,6 +1320,7 @@ class MeasurementStore:
                         payload_hash,
                     ),
                 )
+
                 self.connection.commit()
         except sqlite3.IntegrityError as exc:
             with self._lock:
@@ -1299,6 +1348,9 @@ class MeasurementStore:
         return PhotoDraft(
             id=int(row["id"]),
             event_id=str(row["event_id"]),
+            parent_event_id=str(row["parent_event_id"] or row["event_id"]),
+            capture_kind=str(row["capture_kind"]),
+            capture_round=int(row["capture_round"]),
             qr_code=str(row["qr_code"]),
             captured_at=str(row["captured_at"]),
             image_path=str(row["image_path"]),

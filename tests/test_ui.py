@@ -49,6 +49,9 @@ def test_photo_only_button_is_independent_from_ai_and_next_to_discard() -> None:
     assert "function capturePhotoOnly()" in TEST_UI_HTML
     assert "'/api/photo-capture'" in TEST_UI_HTML
     assert "client_qr_code:clientQr" in TEST_UI_HTML
+    assert "event_id:captureId,parent_event_id:eventId" in TEST_UI_HTML
+    assert "capture_kind:slot.kind,capture_round:slot.round" in TEST_UI_HTML
+    assert "EVENT PHIẾU CÂN:" in TEST_UI_HTML
     assert "ĐÃ CHỤP ẢNH · KHÔNG GỌI AI" in TEST_UI_HTML
     assert "bindActionButton('photoOnlyBtn',()=>capturePhotoOnly())" in TEST_UI_HTML
     assert "console.warn('Không dọn được phiên backend, vẫn bỏ ảnh local:'" in TEST_UI_HTML
@@ -247,20 +250,31 @@ def test_ui_photo_capture_decodes_qr_without_calling_weight_ai(tmp_path) -> None
 
     worker = OutboxSyncWorker(store, "https://example.test", "token", send=fake_send)
     service = StationUIService(store, worker, None, None)
+    parent_event_id = "31c3db88-2c7d-4a35-b5f0-3a83e9a6745a"
+    capture_id = "6a60273c-ea0c-44e8-9599-1ae4c8e597ce"
     result = service.capture_photo_draft(
         make_qr_frame("QR-PHOTO-ONLY-UI"),
-        event_id="6a60273c-ea0c-44e8-9599-1ae4c8e597ce",
+        event_id=capture_id,
+        parent_event_id=parent_event_id,
+        capture_kind="product",
+        capture_round=1,
         station_id="station-01",
         camera_id="camera-01",
     )
-    saved = store.get_photo_draft(str(result["event_id"]))
+    saved = store.get_photo_draft(capture_id)
 
     assert result["ai_requested"] is False
     assert result["qr_code"] == "QR-PHOTO-ONLY-UI"
     assert result["sync_status"] == "synced"
+    assert result["event_id"] == parent_event_id
+    assert result["capture_id"] == capture_id
+    assert result["capture_kind"] == "product"
+    assert result["capture_round"] == 1
     assert saved is not None and saved.status == "awaiting_ai"
+    assert saved.parent_event_id == parent_event_id
     assert store.count() == 0
     assert sent[0]["workflow"] == "photo_draft"
+    assert sent[0]["parent_event_id"] == parent_event_id
     service.close()
     store.close()
 

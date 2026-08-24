@@ -37,6 +37,9 @@ def test_photo_draft_saves_image_without_weight_or_required_qr(tmp_path) -> None
     draft, duplicate = store.save_photo_draft_idempotent(
         np.zeros((80, 120, 3), dtype=np.uint8),
         event_id=event_id,
+        parent_event_id="a5a53a31-3b46-484e-b111-59735657bed7",
+        capture_kind="product",
+        capture_round=1,
         needs_sync=True,
         gateway_id="gateway-test",
         station_id="station-01",
@@ -45,6 +48,20 @@ def test_photo_draft_saves_image_without_weight_or_required_qr(tmp_path) -> None
     again, is_duplicate = store.save_photo_draft_idempotent(
         np.zeros((80, 120, 3), dtype=np.uint8),
         event_id=event_id,
+        parent_event_id="a5a53a31-3b46-484e-b111-59735657bed7",
+        capture_kind="product",
+        capture_round=1,
+        needs_sync=True,
+        gateway_id="gateway-test",
+        station_id="station-01",
+        camera_id="camera-01",
+    )
+    sibling, sibling_duplicate = store.save_photo_draft_idempotent(
+        np.full((80, 120, 3), 20, dtype=np.uint8),
+        event_id="d7a3f837-20be-43e4-aad1-0ae6c4e6bccf",
+        parent_event_id="a5a53a31-3b46-484e-b111-59735657bed7",
+        capture_kind="core",
+        capture_round=1,
         needs_sync=True,
         gateway_id="gateway-test",
         station_id="station-01",
@@ -59,6 +76,15 @@ def test_photo_draft_saves_image_without_weight_or_required_qr(tmp_path) -> None
     assert is_duplicate is True
     assert again == draft
     assert draft.qr_code == ""
+    assert draft.parent_event_id == "a5a53a31-3b46-484e-b111-59735657bed7"
+    assert draft.capture_kind == "product"
+    assert draft.capture_round == 1
+    assert sibling_duplicate is False
+    assert sibling.parent_event_id == draft.parent_event_id
+    assert store.connection.execute(
+        "SELECT COUNT(*) FROM photo_drafts WHERE parent_event_id = ?",
+        (draft.parent_event_id,),
+    ).fetchone()[0] == 2
     assert draft.status == "awaiting_ai"
     assert draft.sync_status == "pending"
     assert "weight" not in columns

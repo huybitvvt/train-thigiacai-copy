@@ -526,6 +526,15 @@ Deno.serve(async (request: Request) => {
     return json(422, { ok: false, error: "invalid_workflow" });
   }
   const eventId = typeof body.event_id === "string" ? body.event_id : "";
+  const parentEventId = typeof body.parent_event_id === "string"
+    ? body.parent_event_id.trim()
+    : eventId;
+  const captureKind = typeof body.capture_kind === "string"
+    ? body.capture_kind.trim().toLowerCase()
+    : "core";
+  const captureRound = typeof body.capture_round === "number"
+    ? body.capture_round
+    : 0;
   const qrCode = typeof body.qr_code === "string" ? body.qr_code.trim() : "";
   const productCode = typeof body.product_code === "string"
     ? body.product_code.trim()
@@ -589,6 +598,14 @@ Deno.serve(async (request: Request) => {
 
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(eventId)) {
     return json(422, { ok: false, error: "invalid_event_id" });
+  }
+  if (
+    photoDraft &&
+    (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(parentEventId) ||
+      !["core", "product"].includes(captureKind) ||
+      !Number.isInteger(captureRound) || captureRound < 0 || captureRound > 3)
+  ) {
+    return json(422, { ok: false, error: "invalid_photo_event_slot" });
   }
   if (
     (!photoDraft && !qrCode) || qrCode.length > 512 ||
@@ -705,7 +722,8 @@ Deno.serve(async (request: Request) => {
     const photoSelect =
       "id,event_id,qr_code,captured_at,image_path,image_url,image_public_id," +
       "gateway_id,station_id,camera_id,frame_sha256,payload_hash,qr_source," +
-      "work_date,shift,machine,production_order,status";
+      "work_date,shift,machine,production_order,status,parent_event_id," +
+      "capture_kind,capture_round";
     const { data: existingPhoto, error: photoLookupError } = await supabase
       .from(PHOTO_DRAFT_TABLE)
       .select(photoSelect)
@@ -718,7 +736,10 @@ Deno.serve(async (request: Request) => {
       const existingRow = existingPhoto as unknown as Record<string, unknown>;
       if (
         existingRow.payload_hash !== payloadHash ||
-        existingRow.frame_sha256 !== frameSha256
+        existingRow.frame_sha256 !== frameSha256 ||
+        existingRow.parent_event_id !== parentEventId ||
+        existingRow.capture_kind !== captureKind ||
+        existingRow.capture_round !== captureRound
       ) {
         return json(409, { ok: false, error: "event_id_conflict" });
       }
@@ -726,6 +747,9 @@ Deno.serve(async (request: Request) => {
         ok: true,
         id: existingRow.id,
         event_id: eventId,
+        parent_event_id: parentEventId,
+        capture_kind: captureKind,
+        capture_round: captureRound,
         image_url: existingRow.image_url,
         image_public_id: existingRow.image_public_id,
         qr_code: existingRow.qr_code,
@@ -751,7 +775,7 @@ Deno.serve(async (request: Request) => {
     try {
       uploaded = await uploadToCloudinary(
         image,
-        `roll-captures/${gatewayId}/${year}/${month}/${day}/photo-draft/${eventId}`,
+        `roll-captures/${gatewayId}/${year}/${month}/${day}/photo-draft/${parentEventId}/${captureKind}-${captureRound + 1}/${eventId}`,
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : "cloudinary_upload_failed";
@@ -761,6 +785,9 @@ Deno.serve(async (request: Request) => {
       .from(PHOTO_DRAFT_TABLE)
       .insert({
         event_id: eventId,
+        parent_event_id: parentEventId,
+        capture_kind: captureKind,
+        capture_round: captureRound,
         qr_code: qrCode || null,
         captured_at: capturedAt,
         image_path: uploaded.publicId,
@@ -781,6 +808,9 @@ Deno.serve(async (request: Request) => {
           ai_requested: false,
           ingested_at: photoNow,
           workflow: "photo_draft",
+          parent_event_id: parentEventId,
+          capture_kind: captureKind,
+          capture_round: captureRound,
         },
       })
       .select(photoSelect)
@@ -796,7 +826,10 @@ Deno.serve(async (request: Request) => {
           const racedRow = racedPhoto as unknown as Record<string, unknown>;
           if (
             racedRow.payload_hash !== payloadHash ||
-            racedRow.frame_sha256 !== frameSha256
+            racedRow.frame_sha256 !== frameSha256 ||
+            racedRow.parent_event_id !== parentEventId ||
+            racedRow.capture_kind !== captureKind ||
+            racedRow.capture_round !== captureRound
           ) {
             return json(409, { ok: false, error: "event_id_conflict" });
           }
@@ -804,6 +837,9 @@ Deno.serve(async (request: Request) => {
             ok: true,
             id: racedRow.id,
             event_id: eventId,
+            parent_event_id: parentEventId,
+            capture_kind: captureKind,
+            capture_round: captureRound,
             image_url: racedRow.image_url,
             image_public_id: racedRow.image_public_id,
             qr_code: racedRow.qr_code,
@@ -819,6 +855,9 @@ Deno.serve(async (request: Request) => {
       ok: true,
       id: insertedPhoto.id,
       event_id: eventId,
+      parent_event_id: parentEventId,
+      capture_kind: captureKind,
+      capture_round: captureRound,
       image_url: uploaded.secureUrl,
       image_public_id: uploaded.publicId,
       qr_code: insertedPhoto.qr_code,

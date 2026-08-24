@@ -351,6 +351,11 @@ select setval(
 create table if not exists public.anh_can_cho_ai (
   id bigserial primary key,
   event_id uuid not null unique,
+  parent_event_id uuid not null,
+  capture_kind text not null default 'core'
+    check (capture_kind in ('core', 'product')),
+  capture_round integer not null default 0
+    check (capture_round between 0 and 3),
   qr_code text,
   captured_at timestamptz not null,
   image_path text not null,
@@ -377,6 +382,8 @@ create index if not exists anh_can_cho_ai_status_time_idx
 create index if not exists anh_can_cho_ai_qr_idx
   on public.anh_can_cho_ai (qr_code)
   where qr_code is not null;
+create index if not exists anh_can_cho_ai_parent_event_idx
+  on public.anh_can_cho_ai (parent_event_id, capture_round, capture_kind);
 
 alter table public.anh_can_cho_ai enable row level security;
 revoke all on table public.anh_can_cho_ai from anon, authenticated;

@@ -12,6 +12,13 @@ MIGRATION = (
     / "migrations"
     / "20260824150000_anh_can_cho_ai.sql"
 ).read_text(encoding="utf-8")
+PARENT_EVENT_MIGRATION = (
+    ROOT
+    / "backend"
+    / "supabase"
+    / "migrations"
+    / "20260824170000_photo_draft_parent_event.sql"
+).read_text(encoding="utf-8")
 
 
 def test_photo_draft_table_keeps_weight_data_truly_empty() -> None:
@@ -29,4 +36,13 @@ def test_ingest_routes_photo_draft_before_measurement_validation() -> None:
     assert 'if (!photoDraft && (!Number.isFinite(weight)' in FUNCTION
     assert 'status: "awaiting_ai"' in FUNCTION
     assert 'ai_requested: false' in FUNCTION
-    assert "/photo-draft/${eventId}" in FUNCTION
+    assert "/photo-draft/${parentEventId}/${captureKind}-${captureRound + 1}/${eventId}" in FUNCTION
+
+
+def test_photo_draft_is_linked_to_weigh_event_and_slot() -> None:
+    lowered = PARENT_EVENT_MIGRATION.lower()
+    assert "parent_event_id uuid" in lowered
+    assert "capture_kind text" in lowered
+    assert "capture_round integer" in lowered
+    assert "anh_can_cho_ai_parent_event_idx" in lowered
+    assert "parent_event_id: parenteventid" in FUNCTION.lower()

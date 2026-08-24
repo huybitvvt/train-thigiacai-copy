@@ -230,7 +230,7 @@ function prefersDirectMobileCamera(){return Boolean((window.matchMedia&&window.m
 async function openPrimaryCamera(){if(prefersDirectMobileCamera()){await openDefaultCamera(current());return}await openCameraSetup()}
 let captureBarcodeDetector=null;
 const MAX_WEIGH_ROUNDS=4,DEFAULT_WEIGH_ROUNDS=2;
-function emptyWeighRound(){return{eventId:newEventId(),saved:false,syncStatus:'',syncError:'',coreImage:'',productImage:'',coreAnalysis:null,productAnalysis:null,weight:'',productWeight:'',qr:'',analyzedWeight:null,analyzedRaw:'',productAnalyzedWeight:null,productAnalyzedRaw:''}}
+function emptyWeighRound(){return{eventId:newEventId(),saved:false,syncStatus:'',syncError:'',corePhotoCaptureId:'',productPhotoCaptureId:'',coreImage:'',productImage:'',coreAnalysis:null,productAnalysis:null,weight:'',productWeight:'',qr:'',analyzedWeight:null,analyzedRaw:'',productAnalyzedWeight:null,productAnalyzedRaw:''}}
 function roundHasData(round){return Boolean(round&&(round.coreImage||round.productImage||round.coreAnalysis||round.productAnalysis||String(round.weight||'')||String(round.productWeight||'')))}
 function slotHasData(round,kind){if(!round)return false;return kind==='product'?Boolean(round.productImage||round.productAnalysis||String(round.productWeight||'')):Boolean(round.coreImage||round.coreAnalysis||String(round.weight||''))}
 function resetWeighRound(round,keepQr=true){const qr=keepQr?String((round&&round.qr)||''):'';Object.assign(round||{},emptyWeighRound());if(round)round.qr=qr;return round}
@@ -365,16 +365,19 @@ function prepareNextCapture(qrCode,session=current()){clearReview(session);if(se
 
 async function capturePhotoOnly(){
  const session=current();if(!session||session.state==='analyzing'||session.state==='saving')return;
+ ensureRounds(session);const slot=captureSlot(session),round=session.rounds[slot.round];if(round.saved){status(captureStatus,'Lần '+(slot.round+1)+' đã lưu; hãy chọn lượt khác.','warn');return}
  const previous={state:session.state,text:session.stateElement.textContent,className:session.stateElement.className};
  let image;try{if(session.stream)await waitForVideoFrame(session.video);image=drawSession(session)}catch(error){status(captureStatus,error.message,'bad');return}
- const clientQr=await decodeClientQr(session.canvas),eventId=newEventId();persistSourceFromFields();
+ const clientQr=await decodeClientQr(session.canvas),eventId=round.eventId||newEventId(),captureId=newEventId();round.eventId=eventId;if(slot.round===0&&!session.eventId)session.eventId=eventId;persistSourceFromFields();
  session.state='saving';session.stateElement.textContent='ĐANG LƯU ẢNH · KHÔNG GỌI AI';session.stateElement.className='station-state';renderControls();
- status(captureStatus,'Đang lưu một ảnh lên Supabase + Cloudinary và quét QR độc lập…','warn');
+ status(captureStatus,'Đang đưa ảnh vào event '+eventId+' · '+(slot.kind==='product'?'cân sản phẩm':'cân lõi')+' lần '+(slot.round+1)+'…','warn');
  try{
-  const data=await api('/api/photo-capture',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({image,client_qr_code:clientQr,event_id:eventId,station_id:session.stationId,camera_id:session.cameraId,work_date:sourceContext.date,shift:sourceContext.shift,machine:sourceContext.machine,production_order:sourceContext.order})});
-  const cloud=data.sync_status==='synced'?'Ảnh đã lên Cloudinary, hàng chờ đã lưu Supabase.':'Ảnh đã giữ local và sẽ tự đồng bộ lại. '+(data.sync_error||'');
+  const data=await api('/api/photo-capture',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({image,client_qr_code:clientQr,event_id:captureId,parent_event_id:eventId,capture_kind:slot.kind,capture_round:slot.round,station_id:session.stationId,camera_id:session.cameraId,work_date:sourceContext.date,shift:sourceContext.shift,machine:sourceContext.machine,production_order:sourceContext.order})});
+  if(data.event_id!==eventId)throw new Error('Backend trả ảnh sang sai event');
+  if(slot.kind==='product'){round.productImage=image;round.productPhotoCaptureId=data.capture_id||captureId;if(!data.qr_conflict&&data.qr_code&&!String(round.qr||'').trim())round.qr=String(data.qr_code).trim()}else{round.coreImage=image;round.corePhotoCaptureId=data.capture_id||captureId}syncSessionAliases(session);if(slot.kind==='core')session.selectedSlot={kind:'product',round:slot.round};else if(slot.round+1<sessionRoundCount(session))session.selectedSlot={kind:'core',round:slot.round+1};if(session===current()){captureQr.value=session.qr||'';renderEvidence(session);updateBoxes(session)}
+  const cloud=data.sync_status==='synced'?'Ảnh đã lên Cloudinary và gắn đúng event trên Supabase.':'Ảnh đã giữ local trong đúng event và sẽ tự đồng bộ lại. '+(data.sync_error||'');
   const qr=data.qr_conflict?'QR xung đột, để trống mã để kiểm tra sau.':data.qr_found?'QR: '+data.qr_code+' · '+data.qr_decoder:'Không thấy QR; mã được để trống.';
-  status(captureStatus,'ĐÃ CHỤP ẢNH · KHÔNG GỌI AI\nID: '+data.event_id+'\n'+qr+'\n'+cloud,data.sync_status==='synced'&&!data.qr_conflict?'ok':'warn');
+  status(captureStatus,'ĐÃ CHỤP ẢNH · KHÔNG GỌI AI\nEVENT PHIẾU CÂN: '+data.event_id+'\nÔ: '+(slot.kind==='product'?'Cân sản phẩm':'Cân lõi')+' lần '+(slot.round+1)+'\n'+qr+'\n'+cloud,data.sync_status==='synced'&&!data.qr_conflict?'ok':'warn');
  }catch(error){status(captureStatus,'KHÔNG LƯU ĐƯỢC ẢNH: '+error.message,'bad')}
  finally{session.state=previous.state;session.stateElement.textContent=previous.text;session.stateElement.className=previous.className;renderControls()}
 }
