@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import argparse
-import shutil
 import base64
-from datetime import datetime, timezone
 import binascii
 import hashlib
 import hmac
@@ -931,7 +929,7 @@ def _local_measurement_items(
         product_weight = item.product_weight
         if product_weight is None:
             match = re.search(
-                r"(?:^|[;\s])PRODUCT_WEIGHT=([0-9]+(?:\.[0-9]+)?)",
+                r"(?:^|; )PRODUCT_WEIGHT=([0-9]+(?:\.[0-9]+)?)",
                 item.weight_raw or "",
             )
             product_weight = float(match.group(1)) if match else None
@@ -947,7 +945,7 @@ def _local_measurement_items(
         product_url = (
             f"/api/measurement-image?event_id={urllib.parse.quote(item.event_id)}&kind=product"
             if has_product
-            else item.remote_product_image_url
+            else None
         )
         payload = {
             "event_id": item.event_id,
@@ -964,9 +962,6 @@ def _local_measurement_items(
             "captured_at": item.captured_at,
             "sync_status": item.sync_status,
             "sync_error": item.sync_error,
-            "cloud_verified_at": item.cloud_verified_at,
-            "cloud_check_error": item.cloud_check_error,
-            "local_images_deleted_at": item.local_images_deleted_at,
             "core_image_url": core_url,
             "product_image_url": product_url,
             "has_core_image": bool(core_url),
@@ -1010,78 +1005,9 @@ def _local_inventory_items(
                 "image_url": image_url,
                 "sync_status": item.sync_status,
                 "sync_error": item.sync_error,
-                "cloud_verified_at": item.cloud_verified_at,
-                "cloud_check_error": item.cloud_check_error,
-                "local_images_deleted_at": item.local_images_deleted_at,
             }
         )
     return items
-
-
-def _retry_sync_payload(
-    service: "StationUIService",
-    *,
-    event_id: str = "",
-    workflow: str = "auto",
-    all_failed: bool = False,
-) -> dict[str, object]:
-    """Retry one outbox row or flush deferred/failed syncs immediately."""
-
-    if service.sync_worker is None:
-        raise ValueError("Chưa cấu hình đồng bộ Supabase trên máy này")
-    event_id = str(event_id or "").strip()
-    workflow = str(workflow or "auto").strip().lower()
-    if all_failed or not event_id:
-        synced = service.sync_worker.sync_once(
-            limit=100,
-            include_deferred=True,
-            retry_failed=True,
-        )
-        return {
-            "ok": True,
-            "mode": "batch",
-            "synced": synced,
-            "message": f"Đã đồng bộ lại {synced} bản ghi",
-        }
-
-    inventory = service.store.get_inventory_check(event_id)
-    measurement = service.store.get(event_id)
-    use_inventory = workflow == "inventory" or (
-        workflow == "auto" and inventory is not None and measurement is None
-    )
-    if use_inventory:
-        if inventory is None:
-            raise ValueError("Không tìm thấy bản ghi Cân kiểm kho local để đồng bộ lại")
-        ok = (
-            service.sync_worker.reconcile_event(event_id, inventory=True)
-            if inventory.sync_status == "synced"
-            else service.sync_worker.sync_inventory_event(event_id)
-        )
-        latest = service.store.get_inventory_check(event_id)
-    else:
-        if measurement is None:
-            raise ValueError("Không tìm thấy lần cân local để đồng bộ lại")
-        ok = (
-            service.sync_worker.reconcile_event(event_id)
-            if measurement.sync_status == "synced"
-            else service.sync_worker.sync_event(event_id)
-        )
-        latest = service.store.get(event_id)
-    status = latest.sync_status if latest is not None else ("synced" if ok else "failed")
-    error = (
-        latest.sync_error or getattr(latest, "cloud_check_error", None)
-        if latest is not None
-        else None
-    )
-    return {
-        "ok": ok,
-        "mode": "single",
-        "workflow": "inventory" if use_inventory else "measurement",
-        "event_id": event_id,
-        "sync_status": status,
-        "sync_error": error,
-        "message": "Đã đồng bộ Supabase" if ok else (error or "Đồng bộ thất bại"),
-    }
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -1108,11 +1034,6 @@ def decode_image(value: str) -> np.ndarray:
     if frame is None:
         raise ValueError("Không giải mã được ảnh")
     return frame
-
-
-def _blank_evidence_frame() -> np.ndarray:
-    """Tiny placeholder used when a weigh slip is saved without camera photos."""
-    return np.full((48, 48, 3), 32, dtype=np.uint8)
 
 
 class StationUIService:
@@ -1579,169 +1500,6 @@ class StationUIService:
             "inference": self.inference.status().as_dict(),
         }
 
-
-    def deferred_root(self) -> Path:
-        root = Path(getattr(self.store, "capture_dir", "data/captures")) / ".deferred"
-        root.mkdir(parents=True, exist_ok=True)
-        return root
-
-    def save_deferred_draft(self, payload: dict[str, object]) -> dict[str, object]:
-        """Persist weigh photos for later AI reading when the live model is offline."""
-        station_id = str(payload.get("station_id") or "").strip()
-        if station_id and station_id not in {
-            str(item["station_id"]) for item in self.station_configs
-        }:
-            raise ValueError("station_id không hợp lệ")
-        rounds_in = payload.get("rounds")
-        if not isinstance(rounds_in, list) or not rounds_in:
-            raise ValueError("Cần ít nhất một lần cân có ảnh để lưu sau")
-        if len(rounds_in) > 4:
-            raise ValueError("Tối đa 4 lần cân mỗi phiếu lưu sau")
-        draft_id = str(uuid.uuid4())
-        folder = self.deferred_root() / draft_id
-        folder.mkdir(parents=True, exist_ok=False)
-        rounds_meta: list[dict[str, object]] = []
-        try:
-            for index, item in enumerate(rounds_in):
-                if not isinstance(item, dict):
-                    raise ValueError("Dữ liệu lần cân không hợp lệ")
-                core_image = str(item.get("core_image") or "").strip()
-                product_image = str(item.get("product_image") or "").strip()
-                if not core_image or not product_image:
-                    raise ValueError(
-                        f"Lần {index + 1} cần đủ ảnh cân lõi và ảnh cân SP trước khi lưu sau"
-                    )
-                entry: dict[str, object] = {
-                    "index": index,
-                    "qr": str(item.get("qr") or "").strip()[:512],
-                    "has_core": True,
-                    "has_product": True,
-                }
-                for kind, encoded in (("core", core_image), ("product", product_image)):
-                    frame = decode_image(encoded)
-                    encoded_ok, encoded_jpg = cv2.imencode(".jpg", frame)
-                    if not encoded_ok:
-                        raise OSError("Không mã hóa được ảnh lưu sau")
-                    image_path = folder / f"{kind}_{index + 1}.jpg"
-                    image_path.write_bytes(encoded_jpg.tobytes())
-                    entry[f"{kind}_path"] = image_path.name
-                rounds_meta.append(entry)
-            created_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-            meta = {
-                "draft_id": draft_id,
-                "created_at": created_at,
-                "station_id": station_id,
-                "unit": str(payload.get("unit") or "kg"),
-                "work_date": str(payload.get("work_date") or ""),
-                "shift": str(payload.get("shift") or ""),
-                "machine": str(payload.get("machine") or ""),
-                "production_order": str(payload.get("production_order") or ""),
-                "bi_weight": payload.get("bi_weight"),
-                "status": "awaiting_ai",
-                "rounds": rounds_meta,
-            }
-            (folder / "draft.json").write_text(
-                json.dumps(meta, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except Exception:
-            shutil.rmtree(folder, ignore_errors=True)
-            raise
-        return {
-            "ok": True,
-            "draft_id": draft_id,
-            "created_at": created_at,
-            "round_count": len(rounds_meta),
-            "status": "awaiting_ai",
-        }
-
-    def list_deferred_drafts(self, *, limit: int = 50) -> list[dict[str, object]]:
-        items: list[dict[str, object]] = []
-        root = self.deferred_root()
-        for folder in sorted(root.iterdir(), reverse=True):
-            if not folder.is_dir():
-                continue
-            meta_path = folder / "draft.json"
-            if not meta_path.is_file():
-                continue
-            try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            if not isinstance(meta, dict):
-                continue
-            rounds = meta.get("rounds") if isinstance(meta.get("rounds"), list) else []
-            items.append(
-                {
-                    "draft_id": str(meta.get("draft_id") or folder.name),
-                    "created_at": str(meta.get("created_at") or ""),
-                    "station_id": str(meta.get("station_id") or ""),
-                    "production_order": str(meta.get("production_order") or ""),
-                    "shift": str(meta.get("shift") or ""),
-                    "machine": str(meta.get("machine") or ""),
-                    "work_date": str(meta.get("work_date") or ""),
-                    "status": str(meta.get("status") or "awaiting_ai"),
-                    "round_count": len(rounds),
-                }
-            )
-            if len(items) >= max(1, min(200, int(limit))):
-                break
-        return items
-
-    def load_deferred_draft(
-        self,
-        draft_id: str,
-        *,
-        include_images: bool = True,
-    ) -> dict[str, object]:
-        folder = self.deferred_root() / str(draft_id).strip()
-        meta_path = folder / "draft.json"
-        if not meta_path.is_file():
-            raise FileNotFoundError("Không tìm thấy phiếu lưu sau")
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        if not isinstance(meta, dict):
-            raise ValueError("Phiếu lưu sau bị hỏng")
-        rounds_out: list[dict[str, object]] = []
-        for item in meta.get("rounds") if isinstance(meta.get("rounds"), list) else []:
-            if not isinstance(item, dict):
-                continue
-            entry = {
-                "index": int(item.get("index") or 0),
-                "qr": str(item.get("qr") or ""),
-                "has_core": bool(item.get("has_core")),
-                "has_product": bool(item.get("has_product")),
-            }
-            if include_images:
-                for kind in ("core", "product"):
-                    name = str(item.get(f"{kind}_path") or "")
-                    image_path = folder / name if name else None
-                    if image_path is not None and image_path.is_file():
-                        encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
-                        entry[f"{kind}_image"] = f"data:image/jpeg;base64,{encoded}"
-            rounds_out.append(entry)
-        return {
-            "ok": True,
-            "draft_id": str(meta.get("draft_id") or draft_id),
-            "created_at": str(meta.get("created_at") or ""),
-            "station_id": str(meta.get("station_id") or ""),
-            "unit": str(meta.get("unit") or "kg"),
-            "work_date": str(meta.get("work_date") or ""),
-            "shift": str(meta.get("shift") or ""),
-            "machine": str(meta.get("machine") or ""),
-            "production_order": str(meta.get("production_order") or ""),
-            "bi_weight": meta.get("bi_weight"),
-            "status": str(meta.get("status") or "awaiting_ai"),
-            "rounds": rounds_out,
-        }
-
-    def delete_deferred_draft(self, draft_id: str) -> bool:
-        folder = self.deferred_root() / str(draft_id).strip()
-        if not folder.is_dir():
-            return False
-        shutil.rmtree(folder, ignore_errors=True)
-        return True
-
-
     def stage_evidence_step(
         self,
         frame: np.ndarray,
@@ -1752,20 +1510,16 @@ class StationUIService:
         weight: float,
         unit: str,
         qr_code: str = "",
-        step_index: int | None = None,
     ) -> dict[str, object]:
         """Durably save each accepted weighing step before final confirmation."""
         if kind not in {"core", "product", "inventory"}:
             raise ValueError("capture_kind phải là core, product hoặc inventory")
         if station_id not in {str(item["station_id"]) for item in self.station_configs}:
             raise ValueError("station_id không hợp lệ")
-        if step_index is not None and not 1 <= int(step_index) <= 24:
-            raise ValueError("Thứ tự ảnh cân không hợp lệ")
         uuid.UUID(event_id)
         folder = self.sessions.staging_dir / station_id
         folder.mkdir(parents=True, exist_ok=True)
-        step_suffix = f"_{int(step_index)}" if step_index is not None else ""
-        image_path = folder / f"{event_id}_{kind}{step_suffix}.jpg"
+        image_path = folder / f"{event_id}_{kind}.jpg"
         metadata_path = folder / f"{event_id}_steps.json"
         encoded_ok, encoded = cv2.imencode(".jpg", frame)
         if not encoded_ok:
@@ -1780,12 +1534,11 @@ class StationUIService:
                         metadata.update(loaded)
                 except (OSError, json.JSONDecodeError):
                     pass
-            metadata[f"{kind}{step_suffix}"] = {
+            metadata[kind] = {
                 "image_path": str(image_path.resolve()),
                 "weight": float(weight),
                 "unit": unit,
                 "qr_code": qr_code.strip(),
-                "step_index": int(step_index) if step_index is not None else None,
             }
             metadata_path.write_text(
                 json.dumps(metadata, ensure_ascii=False, indent=2),
@@ -1968,13 +1721,9 @@ class StationUIService:
         except (ValueError, TypeError, AttributeError):
             return
         folder = self.sessions.staging_dir / station_id
-        paths = [folder / f"{event_id}_steps.json"]
-        for kind in ("core", "product", "inventory"):
-            paths.append(folder / f"{event_id}_{kind}.jpg")
-            paths.extend(folder.glob(f"{event_id}_{kind}_[0-9]*.jpg"))
-        for path in paths:
+        for suffix in ("_core.jpg", "_product.jpg", "_inventory.jpg", "_steps.json"):
             try:
-                path.unlink(missing_ok=True)
+                (folder / f"{event_id}{suffix}").unlink(missing_ok=True)
             except OSError:
                 pass
 
@@ -2520,37 +2269,15 @@ class StationUIService:
         station_id: str | None = None,
         camera_id: str | None = None,
         frame_sha256: str | None = None,
-        allow_missing_image: bool = False,
-        skip_quality: bool = False,
-        allow_empty_qr: bool = False,
     ) -> dict[str, object]:
         qr_code = qr_code.strip()
-        if not qr_code and product_frame is not None:
-            decoded = self.decode_qr(product_frame)
-            if decoded.get("found"):
-                qr_code = str(decoded["qr_code"])
-                qr_source = f"camera:{decoded['decoder']}"
-            else:
-                qr_source = ""
-        else:
-            qr_source = ""
         if not qr_code:
-            if allow_missing_image and not allow_empty_qr:
-                raise ValueError("Chưa có mã SP")
-            if not allow_missing_image:
-                decoded = self.decode_qr(frame)
-                if decoded.get("found"):
-                    qr_code = str(decoded["qr_code"])
-                    qr_source = f"camera:{decoded['decoder']}"
-                elif allow_empty_qr:
-                    qr_source = "unscanned"
-                else:
-                    raise ValueError("Chưa có QR; hãy quét mã hoặc đưa QR vào camera")
-            elif allow_empty_qr:
-                qr_source = "unscanned"
-            else:
-                raise ValueError("Chưa có mã SP")
-        if not qr_source:
+            decoded = self.decode_qr(frame)
+            if not decoded.get("found"):
+                raise ValueError("Chưa có QR; hãy quét mã hoặc đưa QR vào camera")
+            qr_code = str(decoded["qr_code"])
+            qr_source = f"camera:{decoded['decoder']}"
+        else:
             qr_source = "test-ui:input"
         if len(qr_code) > 512:
             raise ValueError("QR dài quá 512 ký tự")
@@ -2558,23 +2285,17 @@ class StationUIService:
             raise ValueError("Đơn vị không hợp lệ")
         if not math.isfinite(weight) or weight < 0:
             raise ValueError("Số cân phải là số không âm")
-        if not allow_missing_image and not skip_quality:
-            quality = self.assess_quality(frame)
-            quality_payload, quality_pass = self.quality_result(quality)
-            if not quality_pass:
-                raise ValueError(
-                    "Ảnh chưa đạt chất lượng: "
-                    + "; ".join(str(issue) for issue in quality_payload["issues"])
-                )
+        quality = self.assess_quality(frame)
+        quality_payload, quality_pass = self.quality_result(quality)
+        if not quality_pass:
+            raise ValueError(
+                "Ảnh chưa đạt chất lượng: "
+                + "; ".join(str(issue) for issue in quality_payload["issues"])
+            )
 
-        binding_values = (analysis_id, station_id, camera_id)
-        bound_capture = any(binding_values) or bool(frame_sha256)
-        if allow_missing_image:
-            bound_capture = False
-            event_id = event_id or str(uuid.uuid4())
-            analysis_id = None
-            frame_sha256 = None
-        if bound_capture and not all((event_id, analysis_id, station_id, camera_id)):
+        identity_values = (event_id, analysis_id, station_id, camera_id)
+        bound_capture = any(identity_values) or bool(frame_sha256)
+        if bound_capture and not all(identity_values):
             raise ValueError("Cần đủ event_id, analysis_id, station_id và camera_id")
         computed_frame_sha = jpeg_sha256(encode_staged_jpeg(frame))
         if frame_sha256 and frame_sha256.lower() != computed_frame_sha:
@@ -2613,7 +2334,7 @@ class StationUIService:
 
         with self._lock:
             capture_key = frame_fingerprint(frame)
-            if not bound_capture and not allow_missing_image and not event_id:
+            if not bound_capture:
                 now = time.monotonic()
                 if now - self._recent.get(capture_key, float("-inf")) < self.duplicate_window:
                     raise ValueError("Ảnh này vừa được lưu; hãy chụp khung hình mới")
@@ -2623,9 +2344,7 @@ class StationUIService:
                 unit=unit,
                 frame=frame,
                 weight_source=(
-                    "manual-no-image"
-                    if allow_missing_image
-                    else "camera-gemini:test-ui"
+                    "camera-gemini:test-ui"
                     if vision_confirmed and "GEMINI" in weight_raw
                     else "camera-ocr:test-ui"
                     if vision_confirmed
@@ -2636,24 +2355,24 @@ class StationUIService:
                 weight_raw=_persistable_weight_raw(
                     weight_raw,
                     weight=weight,
-                    vision_confirmed=vision_confirmed and not allow_missing_image,
+                    vision_confirmed=vision_confirmed,
                 ),
                 weight_stable=True,
                 event_id=event_id,
                 captured_at=captured_at,
-                gateway_id=self.gateway_id if (bound_capture or event_id) else "",
+                gateway_id=self.gateway_id if bound_capture else "",
                 station_id=station_id or "",
                 camera_id=camera_id or "",
                 analysis_id=analysis_id or "",
             )
-            if not bound_capture and not allow_missing_image and not event_id:
+            if not bound_capture:
                 self._recent[capture_key] = time.monotonic()
 
         if bound_capture:
             self.sessions.mark_saved(str(analysis_id))
         if product_weight is not None:
             self.store.attach_product_weight(measurement.event_id, product_weight)
-        if product_frame is not None and not allow_missing_image:
+        if product_frame is not None:
             self.store.attach_product_image(measurement.event_id, product_frame)
             measurement = self.store.get(measurement.event_id) or measurement
         if bound_capture and station_id:
@@ -2687,16 +2406,6 @@ class StationUIService:
                             int(remote["id"]) if remote.get("id") is not None else None,
                             str(core_url) if core_url else None,
                             str(core_public_id) if core_public_id else None,
-                            (
-                                str(remote["product_image_url"])
-                                if remote.get("product_image_url")
-                                else None
-                            ),
-                            (
-                                str(remote["product_image_public_id"])
-                                if remote.get("product_image_public_id")
-                                else None
-                            ),
                         )
                         cloud_confirmed = True
                     except Exception:
@@ -2720,12 +2429,6 @@ class StationUIService:
             "remote_id": current.remote_id,
             "remote_image_url": current.remote_image_url,
             "remote_image_public_id": getattr(current, "remote_image_public_id", None),
-            "remote_product_image_url": getattr(
-                current, "remote_product_image_url", None
-            ),
-            "remote_product_image_public_id": getattr(
-                current, "remote_product_image_public_id", None
-            ),
             "sync_error": current.sync_error,
             "pending_count": self.store.pending_count(),
         }
@@ -3135,24 +2838,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lookup-url", default=os.environ.get("ROLL_SCALE_LOOKUP_URL"))
     parser.add_argument("--lookup-token", default=os.environ.get("ROLL_SCALE_LOOKUP_TOKEN"))
     parser.add_argument(
-        "--cloud-reconcile-interval",
-        type=float,
-        default=float(os.environ.get("ROLL_SCALE_CLOUD_RECONCILE_INTERVAL", "300")),
-        help="Số giây giữa hai lượt đối soát URL ảnh Cloudinary",
-    )
-    parser.add_argument(
-        "--cloud-recheck-hours",
-        type=float,
-        default=float(os.environ.get("ROLL_SCALE_CLOUD_RECHECK_HOURS", "24")),
-        help="Số giờ trước khi kiểm tra lại ảnh cloud đã xác nhận",
-    )
-    parser.add_argument(
-        "--local-image-retention-days",
-        type=float,
-        default=float(os.environ.get("ROLL_SCALE_LOCAL_IMAGE_RETENTION_DAYS", "7")),
-        help="Số ngày giữ ảnh local sau khi đối soát cloud thành công",
-    )
-    parser.add_argument(
         "--gateway-id",
         "--device-id",
         dest="gateway_id",
@@ -3252,15 +2937,7 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
     store = MeasurementStore(args.db, args.captures)
     worker = None
     if args.api_url:
-        worker = OutboxSyncWorker(
-            store,
-            args.api_url,
-            args.api_token,
-            args.gateway_id,
-            maintenance_interval=args.cloud_reconcile_interval,
-            retention_days=args.local_image_retention_days,
-            reconcile_recheck_hours=args.cloud_recheck_hours,
-        )
+        worker = OutboxSyncWorker(store, args.api_url, args.api_token, args.gateway_id)
         worker.start()
     service = StationUIService(
         store,
@@ -3534,16 +3211,11 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                 return
             if parsed.path == "/api/status":
                 identity_status = service.status()
-                integrity = store.integrity_summary()
                 self.send_json(
                     200,
                     {
                         "ok": True,
                         "pending_count": store.pending_count(),
-                        "failed_count": integrity["failed"],
-                        "cloud_issue_count": integrity["cloud_error"],
-                        "cloud_unverified_count": integrity["unverified"],
-                        "cloud_integrity": integrity,
                         "yolo_enabled": service.reader.model is not None,
                          "yolo_mode": service.reader.yolo_mode,
                         "ocr_enabled": service.weight_engine != "gemini",
@@ -3615,24 +3287,6 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         "fallback_error": fallback_error or None,
                     },
                 )
-                return
-            if parsed.path == "/api/deferred-drafts":
-                query = urllib.parse.parse_qs(parsed.query)
-                try:
-                    limit = int((query.get("limit") or ["50"])[0])
-                except ValueError:
-                    limit = 50
-                self.send_json(200, {"ok": True, "items": service.list_deferred_drafts(limit=limit)})
-                return
-            if parsed.path.startswith("/api/deferred-drafts/"):
-                draft_id = parsed.path[len("/api/deferred-drafts/"):].strip("/")
-                if not draft_id or "/" in draft_id:
-                    self.send_json(404, {"ok": False, "error": "draft_not_found"})
-                    return
-                try:
-                    self.send_json(200, service.load_deferred_draft(draft_id, include_images=True))
-                except FileNotFoundError:
-                    self.send_json(404, {"ok": False, "error": "draft_not_found"})
                 return
             if parsed.path == "/api/measurements":
                 query = urllib.parse.parse_qs(parsed.query)
@@ -3715,7 +3369,7 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     product_weight_value = item.get("product_weight")
                     if product_weight_value is None:
                         match = re.search(
-                            r"(?:^|[;\s])PRODUCT_WEIGHT=([0-9]+(?:\.[0-9]+)?)",
+                            r"(?:^|; )PRODUCT_WEIGHT=([0-9]+(?:\.[0-9]+)?)",
                             raw_weight,
                         )
                         product_weight_value = float(match.group(1)) if match else item.get("weight")
@@ -3890,18 +3544,6 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                 return
             try:
                 payload = self.read_json()
-                if self.path == "/api/deferred-drafts":
-                    result = service.save_deferred_draft(payload if isinstance(payload, dict) else {})
-                    self.send_json(201, result)
-                    return
-                if self.path.startswith("/api/deferred-drafts/") and self.path.endswith("/delete"):
-                    draft_id = self.path[len("/api/deferred-drafts/"):-len("/delete")].strip("/")
-                    deleted = service.delete_deferred_draft(draft_id)
-                    if not deleted:
-                        self.send_json(404, {"ok": False, "error": "draft_not_found"})
-                        return
-                    self.send_json(200, {"ok": True, "deleted": True, "draft_id": draft_id})
-                    return
                 if self.path == "/api/session/discard":
                     discarded = service.discard_session(
                         str(payload.get("station_id", "")),
@@ -3936,80 +3578,6 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                             ),
                         },
                     )
-                    return
-                if parsed.path == "/api/sync-retry":
-                    result = _retry_sync_payload(
-                        service,
-                        event_id=str(payload.get("event_id", "") or ""),
-                        workflow=str(payload.get("workflow", "auto") or "auto"),
-                        all_failed=bool(payload.get("all_failed", False)),
-                    )
-                    self.send_json(200, result)
-                    return
-                if parsed.path == "/api/capture":
-                    try:
-                        weight = float(payload.get("weight", ""))
-                    except (TypeError, ValueError) as exc:
-                        raise ValueError("Số cân không hợp lệ") from exc
-                    weight_raw = _merge_source_tags(str(payload.get("weight_raw", "")), payload)
-                    if not _raw_tag(weight_raw, "SOURCE_PRODUCTION_ORDER"):
-                        raise ValueError("Thiếu Lệnh sản xuất")
-                    image_value = str(payload.get("image", "") or "").strip()
-                    product_image_value = str(payload.get("product_image", "") or "").strip()
-                    allow_missing_image = not bool(image_value)
-                    frame = (
-                        decode_image(image_value)
-                        if image_value
-                        else _blank_evidence_frame()
-                    )
-                    product_frame = (
-                        decode_image(product_image_value) if product_image_value else None
-                    )
-                    if payload.get("product_image_same_as_image") is True:
-                        if not image_value:
-                            raise ValueError("Thiếu ảnh sản phẩm dùng chung")
-                        product_frame = frame.copy()
-                    product_weight_value = payload.get("product_weight")
-                    if product_weight_value is None:
-                        product_match = re.search(
-                            r"(?:^|[;\s])PRODUCT_WEIGHT=([0-9]+(?:\.[0-9]+)?)",
-                            weight_raw,
-                        )
-                        product_weight_value = product_match.group(1) if product_match else 0
-                    if allow_missing_image and "IMAGE_SOURCE=NONE" not in weight_raw:
-                        weight_raw = (
-                            f"{weight_raw}; IMAGE_SOURCE=NONE"
-                            if weight_raw
-                            else "IMAGE_SOURCE=NONE"
-                        )
-                    persist_without_ai = bool(payload.get("persist_without_ai"))
-                    result = service.capture(
-                        str(payload.get("qr_code", "")),
-                        weight,
-                        str(payload.get("unit", "kg")),
-                        frame,
-                        bool(payload.get("vision_confirmed", False)),
-                        weight_raw,
-                        product_frame=product_frame,
-                        product_weight=float(product_weight_value),
-                        event_id=str(payload["event_id"]) if payload.get("event_id") else None,
-                        analysis_id=str(payload["analysis_id"])
-                        if payload.get("analysis_id")
-                        else None,
-                        station_id=str(payload["station_id"])
-                        if payload.get("station_id")
-                        else None,
-                        camera_id=str(payload["camera_id"])
-                        if payload.get("camera_id")
-                        else None,
-                        frame_sha256=str(payload["frame_sha256"])
-                        if payload.get("frame_sha256")
-                        else None,
-                        allow_missing_image=allow_missing_image,
-                        skip_quality=persist_without_ai,
-                        allow_empty_qr=persist_without_ai,
-                    )
-                    self.send_json(201, result)
                     return
                 frame = decode_image(str(payload.get("image", "")))
                 if self.path == "/api/panel/detect":
@@ -4059,18 +3627,14 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         if not isinstance(encoded_frame, str):
                             raise ValueError("Burst chứa ảnh không hợp lệ")
                         weight_frames.append(decode_image(encoded_frame))
-                    # Core binds by default. Product may also bind when the UI
-                    # skips core weighing and uses a fixed default core weight.
-                    bind_session = capture_kind != "product" or bool(
-                        payload.get("bind_session", False)
-                    )
+                    bind_core = capture_kind != "product"
                     result = service.analyze(
                         frame,
                         str(payload.get("roi", "")),
                         str(payload.get("unit", "kg")),
-                        event_id=str(payload["event_id"]) if bind_session and payload.get("event_id") else None,
-                        station_id=str(payload["station_id"]) if bind_session and payload.get("station_id") else None,
-                        camera_id=str(payload["camera_id"]) if bind_session and payload.get("camera_id") else None,
+                        event_id=str(payload["event_id"]) if bind_core and payload.get("event_id") else None,
+                        station_id=str(payload["station_id"]) if bind_core and payload.get("station_id") else None,
+                        camera_id=str(payload["camera_id"]) if bind_core and payload.get("camera_id") else None,
                         weight_frames=weight_frames,
                         require_temporal=bool(payload.get("camera_capture", False)),
                         recognition_profile=str(payload.get("recognition_profile", "fast")),
@@ -4097,11 +3661,6 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                             weight=float(result["weight"]),
                             unit=str(result.get("unit", payload.get("unit", "kg"))),
                             qr_code=str(result.get("qr_code", "")),
-                            step_index=(
-                                int(payload.get("capture_round", 0)) + 1
-                                if payload.get("capture_round") is not None
-                                else None
-                            ),
                         )
                         result["step_saved"] = True
                         result["step_image_path"] = staged["image_path"]
@@ -4122,6 +3681,48 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         frame,
                         str(payload.get("qr_roi", "")),
                         metadata,
+                    )
+                    self.send_json(201, result)
+                    return
+                if self.path == "/api/capture":
+                    try:
+                        weight = float(payload.get("weight", ""))
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError("Số cân không hợp lệ") from exc
+                    weight_raw = _merge_source_tags(str(payload.get("weight_raw", "")), payload)
+                    if not _raw_tag(weight_raw, "SOURCE_PRODUCTION_ORDER"):
+                        raise ValueError("Thiếu Lệnh sản xuất")
+                    product_weight_value = payload.get("product_weight")
+                    if product_weight_value is None:
+                        product_match = re.search(
+                            r"(?:^|; )PRODUCT_WEIGHT=([0-9]+(?:\.[0-9]+)?)",
+                            weight_raw,
+                        )
+                        product_weight_value = product_match.group(1) if product_match else None
+                    result = service.capture(
+                        str(payload.get("qr_code", "")),
+                        weight,
+                        str(payload.get("unit", "kg")),
+                        frame,
+                        bool(payload.get("vision_confirmed", False)),
+                        weight_raw,
+                        product_frame=product_frame,
+                        product_weight=float(product_weight_value)
+                        if product_weight_value is not None
+                        else None,
+                        event_id=str(payload["event_id"]) if payload.get("event_id") else None,
+                        analysis_id=str(payload["analysis_id"])
+                        if payload.get("analysis_id")
+                        else None,
+                        station_id=str(payload["station_id"])
+                        if payload.get("station_id")
+                        else None,
+                        camera_id=str(payload["camera_id"])
+                        if payload.get("camera_id")
+                        else None,
+                        frame_sha256=str(payload["frame_sha256"])
+                        if payload.get("frame_sha256")
+                        else None,
                     )
                     self.send_json(201, result)
                     return

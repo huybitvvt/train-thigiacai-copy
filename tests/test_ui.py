@@ -141,85 +141,6 @@ def test_ui_save_reports_cloud_failure_but_keeps_complete_local_event(tmp_path) 
     assert Path(saved.image_path).is_file()
 
 
-def test_capture_persist_without_ai_skips_quality_and_allows_empty_qr(tmp_path) -> None:
-    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
-    service = StationUIService(store, None, None, None)
-    dark = np.zeros((480, 640, 3), dtype=np.uint8)
-
-    result = service.capture(
-        "",
-        0.0,
-        "kg",
-        dark,
-        False,
-        "SOURCE_PRODUCTION_ORDER=LSX-DH060",
-        skip_quality=True,
-        allow_empty_qr=True,
-        product_frame=dark,
-    )
-    saved = store.get(str(result["event_id"]))
-
-    service.close()
-    store.close()
-    assert result["ok"] is True
-    assert saved is not None
-    assert saved.qr_code == ""
-    assert saved.weight == pytest.approx(0.0)
-    assert Path(saved.image_path).is_file()
-
-
-def test_ui_save_requires_photos_and_codes_after_ai_read() -> None:
-    assert "async function saveCapture()" in TEST_UI_HTML
-    assert "Cần đủ ảnh cân lõi và ảnh cân SP" in TEST_UI_HTML
-    assert "$('saveBtn').disabled=panelMode||busy||!completionReady(session)||!sourceChosen;" in TEST_UI_HTML
-    assert "Đang lưu từng mã SP thành từng dòng riêng" in TEST_UI_HTML
-    assert 'id="deferredDraftsCard"' not in TEST_UI_HTML
-    assert "Phiếu chờ AI đọc" not in TEST_UI_HTML
-    assert "loadDeferredDrafts" not in TEST_UI_HTML
-    assert "persistRoundsToDb" not in TEST_UI_HTML
-    assert "persist_without_ai" not in TEST_UI_HTML
-    assert "api('/api/measurements?limit=100')" in TEST_UI_HTML
-    assert "Chưa có bản ghi lần cân." in TEST_UI_HTML
-    assert "sourceQuery()" in TEST_UI_HTML
-    assert "'/api/measurements?limit=100&'+sourceQuery()" not in TEST_UI_HTML
-
-
-def test_ui_retry_with_fixed_unbound_event_id_does_not_duplicate(tmp_path) -> None:
-    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
-    service = StationUIService(store, None, None, None)
-    event_id = str(uuid.uuid4())
-    frame = make_qr_frame("FIXED-ROUND-EVIDENCE")
-
-    first = service.capture(
-        "FIXED-ROUND-001",
-        1.02,
-        "kg",
-        frame,
-        weight_raw="PRODUCT_WEIGHT=13.04",
-        product_frame=frame.copy(),
-        product_weight=13.04,
-        event_id=event_id,
-    )
-    second = service.capture(
-        "FIXED-ROUND-001",
-        1.02,
-        "kg",
-        frame,
-        weight_raw="PRODUCT_WEIGHT=13.04",
-        product_frame=frame.copy(),
-        product_weight=13.04,
-        event_id=event_id,
-    )
-
-    assert first["event_id"] == event_id
-    assert second["event_id"] == event_id
-    assert first["duplicate"] is False
-    assert second["duplicate"] is True
-    assert store.count() == 1
-    service.close()
-    store.close()
-
-
 def test_ui_inventory_capture_uses_one_image_without_core_capture(tmp_path) -> None:
     store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
     service = StationUIService(store, None, None, None)
@@ -1317,9 +1238,9 @@ def test_ui_uses_viet_nhat_red_black_roboto_branding() -> None:
 
 def test_ui_uses_camera_left_params_right_capture_layout() -> None:
     assert "main{width:100%;margin:18px 0;padding:0 18px 24px;display:block}" in TEST_UI_HTML
-    assert "grid-template-columns:minmax(640px,960px) minmax(0,1fr)" in TEST_UI_HTML
+    assert "grid-template-columns:minmax(460px,500px) minmax(0,1fr)" in TEST_UI_HTML
     assert "aspect-ratio:1/1" in TEST_UI_HTML
-    assert ".capture-left{min-width:0;max-width:960px;width:100%}" in TEST_UI_HTML
+    assert "width:min(100%,480px)" in TEST_UI_HTML
     assert 'class="capture-left"' in TEST_UI_HTML
     assert 'class="capture-right"' in TEST_UI_HTML
     assert '<aside class="card lookup-card">' not in TEST_UI_HTML
@@ -1798,15 +1719,14 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "reliableQr=Boolean(data.qr_found&&!data.qr_conflict&&!qrDecoder.startsWith('gemini'))" in TEST_UI_HTML
     assert "if(reliableQr&&String(data.qr_code||'').trim()&&!String(session.qr||'').trim())session.qr=String(data.qr_code).trim()" in TEST_UI_HTML
     assert "$('analyzeCoreBtn').disabled=panelMode||busy||!ready" in TEST_UI_HTML
-    assert "$('analyzeProductBtn').disabled=panelMode||busy||!ready||!(coreReady(session)||hasCorePhoto(session))" in TEST_UI_HTML
+    assert "$('analyzeProductBtn').disabled=panelMode||busy||!ready||!coreReady(session)" in TEST_UI_HTML
     assert "$('analyzeCoreBtn').disabled=panelMode||busy||!ready||!sourceChosen" not in TEST_UI_HTML
     assert "function coreCaptured(session)" in TEST_UI_HTML
     assert "function sourceReady(session)" in TEST_UI_HTML
     assert "if(isProduct&&!coreReady(session))" in TEST_UI_HTML
     assert "session._analyzeLock=false;renderControls();status(captureStatus,error.message" in TEST_UI_HTML
     assert "await api('/api/session/discard'" in TEST_UI_HTML
-    assert "if(!isProduct&&targetRound===0&&(session.analysisId||session.hydratedPending||session.coreAnalysis))" in TEST_UI_HTML
-    assert "Phiên cũ còn kẹt" in TEST_UI_HTML
+    assert "if(!isProduct&&session.coreAnalysis&&session.analysisId)" in TEST_UI_HTML
     assert 'id="analyzeCoreBtn"' in TEST_UI_HTML
     assert 'id="analyzeProductBtn"' in TEST_UI_HTML
     assert 'id="productWeight"' in TEST_UI_HTML
@@ -1814,15 +1734,9 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "analyzeCurrent('product')" in TEST_UI_HTML
     assert "PRODUCT_WEIGHT=" in TEST_UI_HTML
     assert "function productReady(session)" in TEST_UI_HTML
-    assert 'id="weight" type="number" min="0" step="0.001" placeholder="AI tự đọc" readonly aria-readonly="true"' in TEST_UI_HTML
-    assert 'id="productWeight" type="number" min="0" step="0.001" placeholder="AI tự đọc" readonly aria-readonly="true"' in TEST_UI_HTML
-    assert "product_weight:productValue" in TEST_UI_HTML
-    assert "normalizeProductWeight" in TEST_UI_HTML
-    assert "Cần đủ ảnh cân lõi và ảnh cân SP" in TEST_UI_HTML
-    assert "persist_without_ai" not in TEST_UI_HTML
-    assert "persistRoundsToDb" not in TEST_UI_HTML
-    assert 'id="deferredDraftsCard"' not in TEST_UI_HTML
-    assert "ẢNH ĐÃ GIỮ · CHƯA ĐỌC ĐƯỢC SỐ" in TEST_UI_HTML
+    assert "ĐÃ CÂN LÕI · CHỜ CÂN SẢN PHẨM" in TEST_UI_HTML
+    assert 'id="weight" type="number" min="0" step="0.001" placeholder="AI tự đọc" readonly' in TEST_UI_HTML
+    assert 'id="productWeight" type="number" min="0" step="0.001" placeholder="AI tự đọc" readonly' in TEST_UI_HTML
     assert TEST_UI_HTML.count('<span class="kbd">Space</span>') == 3
     assert 'id="inventoryCaptureBtn"' in TEST_UI_HTML
     assert 'class="workflow-tabs" role="tablist"' in TEST_UI_HTML
@@ -1875,7 +1789,7 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "Ảnh cũ đã khóa. Bấm Mở camera" in TEST_UI_HTML
     assert "bindActionButton('inventoryPhoneBtn',()=>captureInventoryPhoto())" in TEST_UI_HTML
     assert "$('captureFileBtn').onclick=()=>$('captureFile').click();$('captureFile').onchange=event=>{const file=event.target.files[0];event.target.value='';loadCaptureFile(file)}" not in TEST_UI_HTML
-    assert "session.selectedSlot={kind:'product',round:targetRound};renderEvidence(session)" in TEST_UI_HTML
+    assert "session.selectedSlot={kind:'core',round:0};ensureRounds(session)" in TEST_UI_HTML
     assert "showCapturedBlank" not in TEST_UI_HTML
     assert "function cameraVideoConstraints()" in TEST_UI_HTML
     assert "facingMode:{ideal:'environment'}" in TEST_UI_HTML
@@ -1897,7 +1811,7 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "width:{ideal:1920}" in TEST_UI_HTML
     assert "height:{ideal:1080}" in TEST_UI_HTML
     assert "AI đọc toàn ảnh" in TEST_UI_HTML
-    assert "setInterval(()=>{if(workflowMode==='inventory')loadInventoryRecords();else{loadRecords()}},15000)" in TEST_UI_HTML
+    assert "setInterval(()=>workflowMode==='inventory'?loadInventoryRecords():loadRecords(),15000)" in TEST_UI_HTML
     assert "appStatus.release||'local'" in TEST_UI_HTML
     assert 'id="panelModeBtn"' in TEST_UI_HTML
     assert 'id="autoDetectPanelBtn"' in TEST_UI_HTML
@@ -1959,11 +1873,9 @@ def test_ui_weighs_multiple_rounds_with_split_second_table() -> None:
     assert "ROUND2_CORE=" in TEST_UI_HTML
     assert "evidence-round split" in TEST_UI_HTML
     assert "evidence-round split" in TEST_UI_HTML
-    assert "if(!isProduct&&targetRound===0&&(session.analysisId||session.hydratedPending||session.coreAnalysis))" in TEST_UI_HTML
+    assert "if(!isProduct&&session.coreAnalysis&&session.analysisId)" in TEST_UI_HTML
     assert "if(targetRound===0)" in TEST_UI_HTML
     assert "capture_kind:targetRound>0?'product':kind" in TEST_UI_HTML
-    assert "syncedAll||(lastData&&lastData.sync_status==='synced')" not in TEST_UI_HTML
-    assert "round.eventId=round.eventId||newEventId()" in TEST_UI_HTML
     assert "$('addRoundBtn').addEventListener('click'" in TEST_UI_HTML
     assert 'id="captureQr2"' in TEST_UI_HTML
     assert "Mã nhập SP lần 1" in TEST_UI_HTML
@@ -2065,14 +1977,14 @@ def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
         "ensureCamerasForSelect()",
         "ensureCameraPermission()",
         "session.stream!==stream||session.streamGeneration!==generation",
-        "ĐỦ ẢNH + MÃ SP · ",
+        "ĐỦ DỮ LIỆU · ",
         "prepareNextCapture('',session)",
         "'awaiting-code'",
         "'awaiting-weight'",
         "function completionReady(session)",
         "function sourceReady(session)",
         "function productReady(session)",
-        "normalizeProductWeight",
+        "ĐÃ CÂN LÕI · CHỜ CÂN SẢN PHẨM",
         'id="analyzeCoreBtn"',
         'id="analyzeProductBtn"',
         'id="productWeight"',
@@ -2089,12 +2001,6 @@ def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
         "session.deviceId&&!session.hasUnsavedReview()",
         "weight_frames:weightFrames",
         "captureWeightBurst(session)",
-        "product_weight:productValue",
-        "Cần đủ ảnh cân lõi và ảnh cân SP",
-        "eventId:newEventId()",
-        "$('saveBtn').disabled=panelMode||busy||!completionReady(session)||!sourceChosen;",
-        "event_id:round.eventId",
-        "syncedAll",
         "function isTextEditingTarget(target)",
         "function discardSlot(",
         "function discardRound(",
@@ -2104,8 +2010,6 @@ def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
         "className='slot-discard'",
     ):
         assert marker in TEST_UI_HTML
-    assert 'id="deferredDraftsCard"' not in TEST_UI_HTML
-    assert "Phiếu chờ AI đọc" not in TEST_UI_HTML
 
 
 def test_parser_auto_selects_gemini_only_when_key_exists_and_engine_is_omitted(
@@ -2345,53 +2249,6 @@ def test_discard_session_removes_transient_step_evidence(tmp_path) -> None:
     store.close()
     assert not Path(str(staged["image_path"])).exists()
     assert not Path(str(staged["metadata_path"])).exists()
-
-
-def test_multiple_product_photos_use_distinct_staging_files(tmp_path) -> None:
-    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
-    service = StationUIService(
-        store,
-        None,
-        None,
-        None,
-        station_count=1,
-        station_ids=["station-01"],
-        camera_ids=["camera-01"],
-    )
-    event_id = str(uuid.uuid4())
-    first_frame = make_qr_frame("ROLL-MULTI-001")
-    second_frame = make_qr_frame("ROLL-MULTI-002")
-
-    first = service.stage_evidence_step(
-        first_frame,
-        event_id=event_id,
-        station_id="station-01",
-        kind="product",
-        weight=10.1,
-        unit="kg",
-        step_index=1,
-    )
-    second = service.stage_evidence_step(
-        second_frame,
-        event_id=event_id,
-        station_id="station-01",
-        kind="product",
-        weight=10.2,
-        unit="kg",
-        step_index=2,
-    )
-
-    first_path = Path(str(first["image_path"]))
-    second_path = Path(str(second["image_path"]))
-    assert first_path != second_path
-    assert first_path.is_file() and second_path.is_file()
-    assert first_path.read_bytes() != second_path.read_bytes()
-
-    service._cleanup_evidence_steps("station-01", event_id)
-    service.close()
-    store.close()
-    assert not first_path.exists()
-    assert not second_path.exists()
 
 
 def test_service_rejects_duplicate_logical_camera_ids(tmp_path) -> None:

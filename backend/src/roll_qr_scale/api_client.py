@@ -272,21 +272,10 @@ def post_measurement(
         headers=headers,
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            response_body = response.read()
-            if not 200 <= response.status < 300:
-                raise RuntimeError(f"API returned HTTP {response.status}")
-    except urllib.error.HTTPError as exc:
-        detail = ""
-        try:
-            payload = json.loads(exc.read().decode("utf-8"))
-            if isinstance(payload, dict):
-                detail = str(payload.get("error") or payload.get("message") or "").strip()
-        except Exception:
-            detail = ""
-        suffix = f": {detail}" if detail else ""
-        raise RuntimeError(f"HTTP Error {exc.code}: {exc.reason}{suffix}") from exc
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        response_body = response.read()
+        if not 200 <= response.status < 300:
+            raise RuntimeError(f"API returned HTTP {response.status}")
     if not response_body:
         return {}
     parsed = json.loads(response_body.decode("utf-8"))

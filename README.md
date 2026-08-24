@@ -413,12 +413,8 @@ Get-CimInstance Win32_SerialPort | Select-Object DeviceID,Name
 - Mạng lỗi chuyển thành `failed`, lưu `sync_error`, tăng `retry_count`.
 - Retry theo exponential backoff từ 2 giây, tối đa 5 phút.
 - Khi Supabase xác nhận, trạng thái thành `synced` và lưu `remote_id`.
-- Worker đối soát định kỳ URL/public ID của ảnh Cloudinary; bản ghi thiếu hoặc ảnh không tải được sẽ hiện cảnh báo riêng, không bị báo thành công giả.
-- Ảnh local chỉ bị xóa sau khi bản ghi đã `synced`, cả ảnh cloud đã đối soát thành công và hết thời gian giữ an toàn. Mặc định giữ 7 ngày.
 - Outbox lấy `gateway_id/station_id/camera_id` từ chính hàng đã commit; ID truyền vào worker chỉ là fallback cho dữ liệu legacy.
 - Edge Function chỉ xử lý lặp an toàn khi cùng `event_id` có payload/hash/danh tính giống hệt; khác biệt trả conflict thay vì overwrite.
-
-Chu kỳ đối soát và giữ ảnh local được điều chỉnh bằng `ROLL_SCALE_CLOUD_RECONCILE_INTERVAL` (giây), `ROLL_SCALE_CLOUD_RECHECK_HOURS` và `ROLL_SCALE_LOCAL_IMAGE_RETENTION_DAYS`.
 
 Ép gửi lại toàn bộ outbox mà không cần mở camera:
 
