@@ -2388,9 +2388,13 @@ class StationUIService:
                 + "; ".join(str(issue) for issue in quality_payload["issues"])
             )
 
-        identity_values = (event_id, analysis_id, station_id, camera_id)
+        # ``event_id`` is also the idempotency key used by unbound, per-round
+        # saves.  It must be accepted on its own so a browser retry cannot
+        # create a second measurement.  Analysis binding is only requested
+        # when one of the analysis identity fields is supplied.
+        identity_values = (analysis_id, station_id, camera_id)
         bound_capture = any(identity_values) or bool(frame_sha256)
-        if bound_capture and not all(identity_values):
+        if bound_capture and not all((event_id, *identity_values)):
             raise ValueError("Cần đủ event_id, analysis_id, station_id và camera_id")
         computed_frame_sha = jpeg_sha256(encode_staged_jpeg(frame))
         if frame_sha256 and frame_sha256.lower() != computed_frame_sha:
@@ -2429,7 +2433,7 @@ class StationUIService:
 
         with self._lock:
             capture_key = frame_fingerprint(frame)
-            if not bound_capture:
+            if not bound_capture and not event_id:
                 now = time.monotonic()
                 if now - self._recent.get(capture_key, float("-inf")) < self.duplicate_window:
                     raise ValueError("Ảnh này vừa được lưu; hãy chụp khung hình mới")
@@ -2455,12 +2459,12 @@ class StationUIService:
                 weight_stable=True,
                 event_id=event_id,
                 captured_at=captured_at,
-                gateway_id=self.gateway_id if bound_capture else "",
+                gateway_id=self.gateway_id if (bound_capture or event_id) else "",
                 station_id=station_id or "",
                 camera_id=camera_id or "",
                 analysis_id=analysis_id or "",
             )
-            if not bound_capture:
+            if not bound_capture and not event_id:
                 self._recent[capture_key] = time.monotonic()
 
         if bound_capture:

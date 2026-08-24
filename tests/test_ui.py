@@ -77,6 +77,55 @@ def test_ui_capture_decodes_qr_and_saves_stable_manual_weight(tmp_path) -> None:
     )
 
 
+def test_ui_capture_accepts_event_id_alone_and_retries_idempotently(tmp_path) -> None:
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    service = StationUIService(store, None, None, None)
+    event_id = str(uuid.uuid4())
+    frame = make_qr_frame("ROLL-PARTIAL-001")
+
+    first = service.capture(
+        "ROLL-PARTIAL-001",
+        12.5,
+        "kg",
+        frame,
+        event_id=event_id,
+        product_frame=frame,
+        product_weight=13.04,
+    )
+    retry = service.capture(
+        "ROLL-PARTIAL-001",
+        12.5,
+        "kg",
+        frame,
+        event_id=event_id,
+        product_frame=frame,
+        product_weight=13.04,
+    )
+    count = store.connection.execute(
+        "SELECT COUNT(*) FROM measurements WHERE event_id = ?", (event_id,)
+    ).fetchone()[0]
+    saved = store.get(event_id)
+    service.close()
+    store.close()
+
+    assert first["duplicate"] is False
+    assert retry["duplicate"] is True
+    assert first["event_id"] == retry["event_id"] == event_id
+    assert count == 1
+    assert saved is not None and saved.product_weight == pytest.approx(13.04)
+
+
+def test_frontend_saves_only_complete_unsaved_rounds_in_separate_requests() -> None:
+    assert "Lưu phần đã đủ" in TEST_UI_HTML
+    assert "function savableRoundIndexes(session)" in TEST_UI_HTML
+    assert "round&&!round.saved&&roundCoreReady" in TEST_UI_HTML
+    assert "for(const index of indexes)" in TEST_UI_HTML
+    assert "event_id:round.eventId" in TEST_UI_HTML
+    assert "product_weight:productValue" in TEST_UI_HTML
+    assert "Bấm Lưu phần đã đủ để thử lại đúng event_id" in TEST_UI_HTML
+    assert "if(!weightsReady(session)){status(captureStatus,'Cần đủ" not in TEST_UI_HTML
+
+
 def test_ui_save_waits_for_same_event_code_weight_and_image_cloud_ack(tmp_path) -> None:
     store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
     sent: list[tuple[dict[str, object], bytes]] = []
