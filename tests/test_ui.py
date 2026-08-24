@@ -1762,7 +1762,7 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "if(isProduct&&!coreReady(session))" in TEST_UI_HTML
     assert "session._analyzeLock=false;renderControls();status(captureStatus,error.message" in TEST_UI_HTML
     assert "await api('/api/session/discard'" in TEST_UI_HTML
-    assert "if(!isProduct&&session.analysisId)" in TEST_UI_HTML
+    assert "if(!isProduct&&session.coreAnalysis&&session.analysisId)" in TEST_UI_HTML
     assert 'id="analyzeCoreBtn"' in TEST_UI_HTML
     assert 'id="analyzeProductBtn"' in TEST_UI_HTML
     assert 'id="productWeight"' in TEST_UI_HTML
@@ -1770,9 +1770,12 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "analyzeCurrent('product')" in TEST_UI_HTML
     assert "PRODUCT_WEIGHT=" in TEST_UI_HTML
     assert "function productReady(session)" in TEST_UI_HTML
-    assert "LÕI '+session.weight+' · CHỜ CÂN SẢN PHẨM" in TEST_UI_HTML
+    assert "DEFAULT_CORE_WEIGHT=1.02" in TEST_UI_HTML
     assert 'id="weight" type="number" min="0" step="0.001" value="1.02" placeholder="1.02"' in TEST_UI_HTML
-    assert 'id="productWeight" type="number" min="0" step="0.001" placeholder="Nhập hoặc AI đọc"' in TEST_UI_HTML
+    assert 'id="productWeight" type="number" min="0" step="0.001" placeholder="Nhập hoặc AI / để trống=0"' in TEST_UI_HTML
+    assert "product_weight:productValue" in TEST_UI_HTML
+    assert "IMAGE_SOURCE=NONE" in TEST_UI_HTML
+    assert "ảnh không bắt buộc" in TEST_UI_HTML
     assert TEST_UI_HTML.count('<span class="kbd">Space</span>') == 3
     assert 'id="inventoryCaptureBtn"' in TEST_UI_HTML
     assert 'class="workflow-tabs" role="tablist"' in TEST_UI_HTML
@@ -1825,7 +1828,7 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "Ảnh cũ đã khóa. Bấm Mở camera" in TEST_UI_HTML
     assert "bindActionButton('inventoryPhoneBtn',()=>captureInventoryPhoto())" in TEST_UI_HTML
     assert "$('captureFileBtn').onclick=()=>$('captureFile').click();$('captureFile').onchange=event=>{const file=event.target.files[0];event.target.value='';loadCaptureFile(file)}" not in TEST_UI_HTML
-    assert "session.selectedSlot={kind:'product',round:0};ensureRounds(session)" in TEST_UI_HTML
+    assert "session.selectedSlot={kind:'product',round:targetRound};renderEvidence(session)" in TEST_UI_HTML
     assert "showCapturedBlank" not in TEST_UI_HTML
     assert "function cameraVideoConstraints()" in TEST_UI_HTML
     assert "facingMode:{ideal:'environment'}" in TEST_UI_HTML
@@ -1847,7 +1850,7 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "width:{ideal:1920}" in TEST_UI_HTML
     assert "height:{ideal:1080}" in TEST_UI_HTML
     assert "AI đọc toàn ảnh" in TEST_UI_HTML
-    assert "setInterval(()=>{if(workflowMode==='inventory')loadInventoryRecords();else loadRecords();refreshSyncHealth()},15000)" in TEST_UI_HTML
+    assert "setInterval(()=>{if(workflowMode==='inventory')loadInventoryRecords();else{loadRecords();loadDeferredDrafts()}},15000)" in TEST_UI_HTML
     assert "appStatus.release||'local'" in TEST_UI_HTML
     assert 'id="panelModeBtn"' in TEST_UI_HTML
     assert 'id="autoDetectPanelBtn"' in TEST_UI_HTML
@@ -1909,7 +1912,7 @@ def test_ui_weighs_multiple_rounds_with_split_second_table() -> None:
     assert "ROUND2_CORE=" in TEST_UI_HTML
     assert "evidence-round split" in TEST_UI_HTML
     assert "evidence-round split" in TEST_UI_HTML
-    assert "if(!isProduct&&session.analysisId)" in TEST_UI_HTML
+    assert "if(!isProduct&&session.coreAnalysis&&session.analysisId)" in TEST_UI_HTML
     assert "if(targetRound===0)" in TEST_UI_HTML
     assert "capture_kind:targetRound>0?'product':kind" in TEST_UI_HTML
     assert "syncedAll||(lastData&&lastData.sync_status==='synced')" not in TEST_UI_HTML
@@ -2015,14 +2018,14 @@ def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
         "ensureCamerasForSelect()",
         "ensureCameraPermission()",
         "session.stream!==stream||session.streamGeneration!==generation",
-        "ĐỦ DỮ LIỆU · ",
+        "ĐỦ ĐỂ LƯU · ",
         "prepareNextCapture('',session)",
         "'awaiting-code'",
         "'awaiting-weight'",
         "function completionReady(session)",
         "function sourceReady(session)",
         "function productReady(session)",
-        "LÕI '+session.weight+' · CHỜ CÂN SẢN PHẨM",
+        "DEFAULT_CORE_WEIGHT=1.02",
         'id="analyzeCoreBtn"',
         'id="analyzeProductBtn"',
         'id="productWeight"',
@@ -2039,14 +2042,12 @@ def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
         "session.deviceId&&!session.hasUnsavedReview()",
         "weight_frames:weightFrames",
         "captureWeightBurst(session)",
-        "capture_round:targetRound",
-        "function thumbnailFromSessionCanvas(session)",
-        "product_image_same_as_image:productOnly",
-        "function setCapturedPreview(session,image)",
+        "capture_round:roundIndex",
+        "product_weight:productValue",
+        "IMAGE_SOURCE=NONE",
         "eventId:newEventId()",
         "event_id:round.eventId",
-        "results.every(data=>data&&data.sync_status==='synced')",
-        "cloud_issue_count",
+        "syncedAll",
         "function isTextEditingTarget(target)",
         "function discardSlot(",
         "function discardRound(",

@@ -931,7 +931,7 @@ def _local_measurement_items(
         product_weight = item.product_weight
         if product_weight is None:
             match = re.search(
-                r"(?:^|; )PRODUCT_WEIGHT=([0-9]+(?:\.[0-9]+)?)",
+                r"(?:^|[;\s])PRODUCT_WEIGHT=([0-9]+(?:\.[0-9]+)?)",
                 item.weight_raw or "",
             )
             product_weight = float(match.group(1)) if match else None
@@ -2521,17 +2521,37 @@ class StationUIService:
         camera_id: str | None = None,
         frame_sha256: str | None = None,
         allow_missing_image: bool = False,
+        skip_quality: bool = False,
+        allow_empty_qr: bool = False,
+        product_frame: np.ndarray | None = None,
     ) -> dict[str, object]:
         qr_code = qr_code.strip()
-        if not qr_code:
-            if allow_missing_image:
-                raise ValueError("Chưa có mã SP")
-            decoded = self.decode_qr(frame)
-            if not decoded.get("found"):
-                raise ValueError("Chưa có QR; hãy quét mã hoặc đưa QR vào camera")
-            qr_code = str(decoded["qr_code"])
-            qr_source = f"camera:{decoded['decoder']}"
+        if not qr_code and product_frame is not None:
+            decoded = self.decode_qr(product_frame)
+            if decoded.get("found"):
+                qr_code = str(decoded["qr_code"])
+                qr_source = f"camera:{decoded['decoder']}"
+            else:
+                qr_source = ""
         else:
+            qr_source = ""
+        if not qr_code:
+            if allow_missing_image and not allow_empty_qr:
+                raise ValueError("Chưa có mã SP")
+            if not allow_missing_image:
+                decoded = self.decode_qr(frame)
+                if decoded.get("found"):
+                    qr_code = str(decoded["qr_code"])
+                    qr_source = f"camera:{decoded['decoder']}"
+                elif allow_empty_qr:
+                    qr_source = "unscanned"
+                else:
+                    raise ValueError("Chưa có QR; hãy quét mã hoặc đưa QR vào camera")
+            elif allow_empty_qr:
+                qr_source = "unscanned"
+            else:
+                raise ValueError("Chưa có mã SP")
+        if not qr_source:
             qr_source = "test-ui:input"
         if len(qr_code) > 512:
             raise ValueError("QR dài quá 512 ký tự")
@@ -2539,7 +2559,7 @@ class StationUIService:
             raise ValueError("Đơn vị không hợp lệ")
         if not math.isfinite(weight) or weight < 0:
             raise ValueError("Số cân phải là số không âm")
-        if not allow_missing_image:
+        if not allow_missing_image and not skip_quality:
             quality = self.assess_quality(frame)
             quality_payload, quality_pass = self.quality_result(quality)
             if not quality_pass:
@@ -3696,7 +3716,7 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     product_weight_value = item.get("product_weight")
                     if product_weight_value is None:
                         match = re.search(
-                            r"(?:^|; )PRODUCT_WEIGHT=([0-9]+(?:\.[0-9]+)?)",
+                            r"(?:^|[;\s])PRODUCT_WEIGHT=([0-9]+(?:\.[0-9]+)?)",
                             raw_weight,
                         )
                         product_weight_value = float(match.group(1)) if match else item.get("weight")
@@ -3953,10 +3973,10 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     product_weight_value = payload.get("product_weight")
                     if product_weight_value is None:
                         product_match = re.search(
-                            r"(?:^|; )PRODUCT_WEIGHT=([0-9]+(?:\.[0-9]+)?)",
+                            r"(?:^|[;\s])PRODUCT_WEIGHT=([0-9]+(?:\.[0-9]+)?)",
                             weight_raw,
                         )
-                        product_weight_value = product_match.group(1) if product_match else None
+                        product_weight_value = product_match.group(1) if product_match else 0
                     if allow_missing_image and "IMAGE_SOURCE=NONE" not in weight_raw:
                         weight_raw = (
                             f"{weight_raw}; IMAGE_SOURCE=NONE"
@@ -3971,9 +3991,7 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         bool(payload.get("vision_confirmed", False)),
                         weight_raw,
                         product_frame=product_frame,
-                        product_weight=float(product_weight_value)
-                        if product_weight_value is not None
-                        else None,
+                        product_weight=float(product_weight_value),
                         event_id=str(payload["event_id"]) if payload.get("event_id") else None,
                         analysis_id=str(payload["analysis_id"])
                         if payload.get("analysis_id")

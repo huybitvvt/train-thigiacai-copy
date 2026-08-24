@@ -85,6 +85,14 @@ class Measurement:
             # Older deployed functions only understand device_id. Sending the
             # same row-derived value keeps those deployments compatible.
             payload["device_id"] = effective_gateway_id
+        # Cloud ingest requires a finite product_weight; missing local values
+        # still sync as 0 rather than JSON null (HTTP 422).
+        if payload.get("product_weight") is None:
+            match = re.search(
+                r"(?:^|[;\s])PRODUCT_WEIGHT=([0-9]+(?:\.[0-9]+)?)",
+                str(self.weight_raw or ""),
+            )
+            payload["product_weight"] = float(match.group(1)) if match else 0.0
         return payload
 
 
@@ -360,7 +368,7 @@ class MeasurementStore:
         ).fetchall()
         for row in product_rows:
             match = re.search(
-                r"(?:^|; )PRODUCT_WEIGHT=([0-9]+(?:\.[0-9]+)?)",
+                r"(?:^|[;\s])PRODUCT_WEIGHT=([0-9]+(?:\.[0-9]+)?)",
                 str(row["weight_raw"]),
             )
             if match:
