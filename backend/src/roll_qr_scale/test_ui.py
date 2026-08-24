@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import base64
+from datetime import datetime, timezone
 import binascii
 import hashlib
 import hmac
@@ -1576,6 +1578,169 @@ class StationUIService:
             "stations": stations,
             "inference": self.inference.status().as_dict(),
         }
+
+
+    def deferred_root(self) -> Path:
+        root = Path(getattr(self.store, "capture_dir", "data/captures")) / ".deferred"
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    def save_deferred_draft(self, payload: dict[str, object]) -> dict[str, object]:
+        """Persist weigh photos for later AI reading when the live model is offline."""
+        station_id = str(payload.get("station_id") or "").strip()
+        if station_id and station_id not in {
+            str(item["station_id"]) for item in self.station_configs
+        }:
+            raise ValueError("station_id không hợp lệ")
+        rounds_in = payload.get("rounds")
+        if not isinstance(rounds_in, list) or not rounds_in:
+            raise ValueError("Cần ít nhất một lần cân có ảnh để lưu sau")
+        if len(rounds_in) > 4:
+            raise ValueError("Tối đa 4 lần cân mỗi phiếu lưu sau")
+        draft_id = str(uuid.uuid4())
+        folder = self.deferred_root() / draft_id
+        folder.mkdir(parents=True, exist_ok=False)
+        rounds_meta: list[dict[str, object]] = []
+        try:
+            for index, item in enumerate(rounds_in):
+                if not isinstance(item, dict):
+                    raise ValueError("Dữ liệu lần cân không hợp lệ")
+                core_image = str(item.get("core_image") or "").strip()
+                product_image = str(item.get("product_image") or "").strip()
+                if not core_image or not product_image:
+                    raise ValueError(
+                        f"Lần {index + 1} cần đủ ảnh cân lõi và ảnh cân SP trước khi lưu sau"
+                    )
+                entry: dict[str, object] = {
+                    "index": index,
+                    "qr": str(item.get("qr") or "").strip()[:512],
+                    "has_core": True,
+                    "has_product": True,
+                }
+                for kind, encoded in (("core", core_image), ("product", product_image)):
+                    frame = decode_image(encoded)
+                    encoded_ok, encoded_jpg = cv2.imencode(".jpg", frame)
+                    if not encoded_ok:
+                        raise OSError("Không mã hóa được ảnh lưu sau")
+                    image_path = folder / f"{kind}_{index + 1}.jpg"
+                    image_path.write_bytes(encoded_jpg.tobytes())
+                    entry[f"{kind}_path"] = image_path.name
+                rounds_meta.append(entry)
+            created_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+            meta = {
+                "draft_id": draft_id,
+                "created_at": created_at,
+                "station_id": station_id,
+                "unit": str(payload.get("unit") or "kg"),
+                "work_date": str(payload.get("work_date") or ""),
+                "shift": str(payload.get("shift") or ""),
+                "machine": str(payload.get("machine") or ""),
+                "production_order": str(payload.get("production_order") or ""),
+                "bi_weight": payload.get("bi_weight"),
+                "status": "awaiting_ai",
+                "rounds": rounds_meta,
+            }
+            (folder / "draft.json").write_text(
+                json.dumps(meta, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            shutil.rmtree(folder, ignore_errors=True)
+            raise
+        return {
+            "ok": True,
+            "draft_id": draft_id,
+            "created_at": created_at,
+            "round_count": len(rounds_meta),
+            "status": "awaiting_ai",
+        }
+
+    def list_deferred_drafts(self, *, limit: int = 50) -> list[dict[str, object]]:
+        items: list[dict[str, object]] = []
+        root = self.deferred_root()
+        for folder in sorted(root.iterdir(), reverse=True):
+            if not folder.is_dir():
+                continue
+            meta_path = folder / "draft.json"
+            if not meta_path.is_file():
+                continue
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(meta, dict):
+                continue
+            rounds = meta.get("rounds") if isinstance(meta.get("rounds"), list) else []
+            items.append(
+                {
+                    "draft_id": str(meta.get("draft_id") or folder.name),
+                    "created_at": str(meta.get("created_at") or ""),
+                    "station_id": str(meta.get("station_id") or ""),
+                    "production_order": str(meta.get("production_order") or ""),
+                    "shift": str(meta.get("shift") or ""),
+                    "machine": str(meta.get("machine") or ""),
+                    "work_date": str(meta.get("work_date") or ""),
+                    "status": str(meta.get("status") or "awaiting_ai"),
+                    "round_count": len(rounds),
+                }
+            )
+            if len(items) >= max(1, min(200, int(limit))):
+                break
+        return items
+
+    def load_deferred_draft(
+        self,
+        draft_id: str,
+        *,
+        include_images: bool = True,
+    ) -> dict[str, object]:
+        folder = self.deferred_root() / str(draft_id).strip()
+        meta_path = folder / "draft.json"
+        if not meta_path.is_file():
+            raise FileNotFoundError("Không tìm thấy phiếu lưu sau")
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        if not isinstance(meta, dict):
+            raise ValueError("Phiếu lưu sau bị hỏng")
+        rounds_out: list[dict[str, object]] = []
+        for item in meta.get("rounds") if isinstance(meta.get("rounds"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            entry = {
+                "index": int(item.get("index") or 0),
+                "qr": str(item.get("qr") or ""),
+                "has_core": bool(item.get("has_core")),
+                "has_product": bool(item.get("has_product")),
+            }
+            if include_images:
+                for kind in ("core", "product"):
+                    name = str(item.get(f"{kind}_path") or "")
+                    image_path = folder / name if name else None
+                    if image_path is not None and image_path.is_file():
+                        encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
+                        entry[f"{kind}_image"] = f"data:image/jpeg;base64,{encoded}"
+            rounds_out.append(entry)
+        return {
+            "ok": True,
+            "draft_id": str(meta.get("draft_id") or draft_id),
+            "created_at": str(meta.get("created_at") or ""),
+            "station_id": str(meta.get("station_id") or ""),
+            "unit": str(meta.get("unit") or "kg"),
+            "work_date": str(meta.get("work_date") or ""),
+            "shift": str(meta.get("shift") or ""),
+            "machine": str(meta.get("machine") or ""),
+            "production_order": str(meta.get("production_order") or ""),
+            "bi_weight": meta.get("bi_weight"),
+            "status": str(meta.get("status") or "awaiting_ai"),
+            "rounds": rounds_out,
+        }
+
+    def delete_deferred_draft(self, draft_id: str) -> bool:
+        folder = self.deferred_root() / str(draft_id).strip()
+        if not folder.is_dir():
+            return False
+        shutil.rmtree(folder, ignore_errors=True)
+        return True
+
 
     def stage_evidence_step(
         self,
@@ -3432,6 +3597,24 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     },
                 )
                 return
+            if parsed.path == "/api/deferred-drafts":
+                query = urllib.parse.parse_qs(parsed.query)
+                try:
+                    limit = int((query.get("limit") or ["50"])[0])
+                except ValueError:
+                    limit = 50
+                self.send_json(200, {"ok": True, "items": service.list_deferred_drafts(limit=limit)})
+                return
+            if parsed.path.startswith("/api/deferred-drafts/"):
+                draft_id = parsed.path[len("/api/deferred-drafts/"):].strip("/")
+                if not draft_id or "/" in draft_id:
+                    self.send_json(404, {"ok": False, "error": "draft_not_found"})
+                    return
+                try:
+                    self.send_json(200, service.load_deferred_draft(draft_id, include_images=True))
+                except FileNotFoundError:
+                    self.send_json(404, {"ok": False, "error": "draft_not_found"})
+                return
             if parsed.path == "/api/measurements":
                 query = urllib.parse.parse_qs(parsed.query)
                 try:
@@ -3688,6 +3871,18 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                 return
             try:
                 payload = self.read_json()
+                if self.path == "/api/deferred-drafts":
+                    result = service.save_deferred_draft(payload if isinstance(payload, dict) else {})
+                    self.send_json(201, result)
+                    return
+                if self.path.startswith("/api/deferred-drafts/") and self.path.endswith("/delete"):
+                    draft_id = self.path[len("/api/deferred-drafts/"):-len("/delete")].strip("/")
+                    deleted = service.delete_deferred_draft(draft_id)
+                    if not deleted:
+                        self.send_json(404, {"ok": False, "error": "draft_not_found"})
+                        return
+                    self.send_json(200, {"ok": True, "deleted": True, "draft_id": draft_id})
+                    return
                 if self.path == "/api/session/discard":
                     discarded = service.discard_session(
                         str(payload.get("station_id", "")),
