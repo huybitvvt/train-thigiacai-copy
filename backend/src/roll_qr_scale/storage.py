@@ -831,13 +831,66 @@ class MeasurementStore:
         return self._from_row(row) if row else None
 
     def recent(self, limit: int = 50) -> list[Measurement]:
-        safe_limit = max(1, min(int(limit), 200))
+        safe_limit = max(1, min(int(limit), 2000))
         with self._lock:
             rows = self.connection.execute(
                 "SELECT * FROM measurements ORDER BY id DESC LIMIT ?",
                 (safe_limit,),
             ).fetchall()
         return [self._from_row(row) for row in rows]
+
+    def delete_measurement(self, event_id: str) -> bool:
+        event_id = str(event_id or "").strip()
+        if not event_id:
+            return False
+        with self._lock:
+            cursor = self.connection.execute(
+                "DELETE FROM measurements WHERE event_id = ?",
+                (event_id,),
+            )
+            self.connection.commit()
+            return cursor.rowcount > 0
+
+    def update_measurement_fields(
+        self,
+        event_id: str,
+        *,
+        qr_code: str,
+        weight: float,
+        product_weight: float,
+        weight_raw: str = "",
+    ) -> Measurement:
+        event_id = str(event_id or "").strip()
+        if not event_id:
+            raise KeyError("Missing event_id")
+        with self._lock:
+            cursor = self.connection.execute(
+                """
+                UPDATE measurements
+                SET qr_code = ?, weight = ?, product_weight = ?,
+                    weight_raw = CASE
+                        WHEN ? != '' THEN ?
+                        ELSE weight_raw
+                    END
+                WHERE event_id = ?
+                """,
+                (
+                    qr_code.strip(),
+                    float(weight),
+                    float(product_weight),
+                    str(weight_raw or "").strip(),
+                    str(weight_raw or "").strip(),
+                    event_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"Unknown capture event: {event_id}")
+            self.connection.commit()
+            row = self.connection.execute(
+                "SELECT * FROM measurements WHERE event_id = ?",
+                (event_id,),
+            ).fetchone()
+        return self._from_row(row)
 
     def measurement_source_rows(self) -> list[dict[str, object]]:
         """Return lightweight source fields for exact filtered measurement counts."""

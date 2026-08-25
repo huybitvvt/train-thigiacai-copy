@@ -1380,7 +1380,18 @@ def test_ui_records_table_shows_bi_and_nvl_weights() -> None:
     assert "function biWeightFromRaw(" in TEST_UI_HTML
     assert "function nvlWeight(" in TEST_UI_HTML
     assert "product-core-bi" in TEST_UI_HTML
-    assert 'colspan="9"' in TEST_UI_HTML
+    assert 'colspan="10"' in TEST_UI_HTML
+    assert ">Mã QR</th>" in TEST_UI_HTML or "<th>Mã QR</th>" in TEST_UI_HTML
+    assert "function productCodeFromQr(" in TEST_UI_HTML
+    assert "productCodeFromQr(item.qr_code)" in TEST_UI_HTML
+    assert "text.indexOf('_')" in TEST_UI_HTML
+    assert "syncCaptureProductCodes(session)" in TEST_UI_HTML
+    assert 'id="editProductCode"' in TEST_UI_HTML
+    assert 'id="captureProductCode"' in TEST_UI_HTML
+    assert "Mã QR lần 1" in TEST_UI_HTML
+    assert "Mã QR lần 2" in TEST_UI_HTML
+    assert "Mã nhập SP lần 1" not in TEST_UI_HTML
+    assert "Mã nhập SP lần 2" not in TEST_UI_HTML
     assert 'id="sourceShift"' in TEST_UI_HTML
     assert 'HC1 · 06:00–14:00' in TEST_UI_HTML
     assert '12C2 · 18:00–06:00' in TEST_UI_HTML
@@ -1454,6 +1465,25 @@ def test_production_orders_follow_selected_date() -> None:
     assert test_ui_module._matches_source_filters(
         items[0], work_date="2026-08-13", production_order="LSX-02"
     )
+
+
+def test_matches_source_filters_supports_date_range_and_qr_code() -> None:
+    item = {
+        "qr_code": "SP-ABC-001",
+        "work_date": "2026-08-20",
+        "shift": "HC1",
+        "weight_raw": "SOURCE_DATE=2026-08-20; SOURCE_SHIFT=HC1",
+        "captured_at": "2026-08-20T10:00:00+07:00",
+    }
+    assert test_ui_module._matches_source_filters(
+        item, date_from="2026-08-19", date_to="2026-08-21"
+    )
+    assert not test_ui_module._matches_source_filters(
+        item, date_from="2026-08-21", date_to="2026-08-22"
+    )
+    assert test_ui_module._matches_source_filters(item, shift="HC1", qr_code="abc")
+    assert not test_ui_module._matches_source_filters(item, shift="HC2")
+    assert not test_ui_module._matches_source_filters(item, qr_code="XYZ")
 
 
 def test_local_measurement_count_uses_all_source_filters_without_display_limit() -> None:
@@ -1977,6 +2007,25 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "#productionToolbar{position:sticky" in TEST_UI_HTML
     assert 'id="productionModeBtn" role="tab"' in TEST_UI_HTML
     assert 'id="inventoryModeBtn" role="tab"' in TEST_UI_HTML
+    assert 'id="listModeBtn" role="tab"' in TEST_UI_HTML
+    assert 'id="listFilters"' in TEST_UI_HTML
+    assert 'id="listDateFrom"' in TEST_UI_HTML
+    assert 'id="listDateTo"' in TEST_UI_HTML
+    assert 'id="listShift"' in TEST_UI_HTML
+    assert 'id="listQrCode"' in TEST_UI_HTML
+    assert 'id="listRecordsCard"' in TEST_UI_HTML
+    assert "loadListRecords()" in TEST_UI_HTML
+    assert "function rereadListRecord(" in TEST_UI_HTML
+    assert "'/api/measurements/reread'" in TEST_UI_HTML
+    assert "reread-core" in TEST_UI_HTML
+    assert "reread-product" in TEST_UI_HTML
+    assert "function decodeQrFromImageUrl(" in TEST_UI_HTML
+    assert "client_qr_code:clientQr" in TEST_UI_HTML
+    assert "QR local" in TEST_UI_HTML or "decoder local" in TEST_UI_HTML
+    assert "Đọc lõi" in TEST_UI_HTML
+    assert "Đọc SP" in TEST_UI_HTML
+    assert "date_from=" in TEST_UI_HTML
+    assert "qr_code=" in TEST_UI_HTML
     assert 'id="inventoryWeight" class="weight" type="number" min="0" step="0.001" placeholder="Auto" readonly' in TEST_UI_HTML
     assert 'id="inventoryCoreWeight" class="weight" type="number" min="0" step="0.001" value="1"' in TEST_UI_HTML
     assert 'id="inventoryTareWeight" class="weight" type="number" min="0" step="0.001" value="0.16"' in TEST_UI_HTML
@@ -2108,8 +2157,8 @@ def test_ui_weighs_multiple_rounds_with_split_second_table() -> None:
     assert "capture_kind:targetRound>0?'product':kind" in TEST_UI_HTML
     assert "$('addRoundBtn').addEventListener('click'" in TEST_UI_HTML
     assert 'id="captureQr2"' in TEST_UI_HTML
-    assert "Mã nhập SP lần 1" in TEST_UI_HTML
-    assert "Mã nhập SP lần 2" in TEST_UI_HTML
+    assert "Mã QR lần 1" in TEST_UI_HTML
+    assert "Mã QR lần 2" in TEST_UI_HTML
     assert "ROUND2_QR=" in TEST_UI_HTML
     assert "function codesReady(" in TEST_UI_HTML
     assert "function applyScannedQr(" in TEST_UI_HTML

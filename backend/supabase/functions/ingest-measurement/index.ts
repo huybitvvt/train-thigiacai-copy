@@ -7,9 +7,15 @@ const INVENTORY_TABLE = "can_kiem_kho";
 const PHOTO_DRAFT_TABLE = "anh_can_cho_ai";
 const SECRET_TABLE = "roll_scale_secrets";
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+function normalizeEventId(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" && Number.isFinite(value)) return String(Math.trunc(value));
+  return "";
+}
 const SHA256_PATTERN = /^[0-9a-f]{64}$/i;
 const EVENT_SELECT =
-  "id,image_path,image_url,image_public_id,core_image_path,core_image_url," +
+  "id,event_id,image_path,image_url,image_public_id,core_image_path,core_image_url," +
   "core_image_public_id,product_image_path,product_image_url,product_image_public_id,qr_code,weight,tare_weight,net_weight,unit,captured_at," +
   "device_id,gateway_id,station_id,camera_id,analysis_id,frame_sha256,payload_hash," +
   "weight_source,qr_source,metadata";
@@ -461,22 +467,50 @@ Deno.serve(async (request: Request) => {
     if (!supabaseUrl || !serviceKey) {
       return json(500, { ok: false, error: "supabase_not_configured" });
     }
-    const requestedLimit = Number(new URL(request.url).searchParams.get("limit") ?? "50");
+    const params = new URL(request.url).searchParams;
+    const requestedLimit = Number(params.get("limit") ?? "50");
+    const requestedOffset = Number(params.get("offset") ?? "0");
     const limit = Number.isInteger(requestedLimit)
-      ? Math.max(1, Math.min(requestedLimit, 200))
+      ? Math.max(1, Math.min(requestedLimit, 1000))
       : 50;
+    const offset = Number.isInteger(requestedOffset)
+      ? Math.max(0, Math.min(requestedOffset, 50000))
+      : 0;
+    const dateFrom = (params.get("date_from") ?? "").trim();
+    const dateTo = (params.get("date_to") ?? "").trim();
+    const shift = (params.get("shift") ?? "").trim();
+    const qrCode = (params.get("qr_code") ?? "").trim();
     const supabase = createClient(supabaseUrl, serviceKey, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
-    const { data, error } = await supabase
+    let query = supabase
       .from(MEASUREMENT_TABLE)
       .select(EVENT_SELECT)
       .order("captured_at", { ascending: false })
-      .limit(limit);
+      .range(offset, offset + limit - 1);
+    if (dateFrom) {
+      query = query.gte("metadata->>work_date", dateFrom);
+    }
+    if (dateTo) {
+      query = query.lte("metadata->>work_date", dateTo);
+    }
+    if (shift) {
+      query = query.eq("metadata->>shift", shift);
+    }
+    if (qrCode) {
+      query = query.ilike("qr_code", `%${qrCode}%`);
+    }
+    const { data, error } = await query;
     if (error) {
       return json(500, { ok: false, error: "measurement_list_failed" });
     }
-    return json(200, { ok: true, source: MEASUREMENT_TABLE, items: data ?? [] });
+    return json(200, {
+      ok: true,
+      source: MEASUREMENT_TABLE,
+      offset,
+      limit,
+      items: data ?? [],
+    });
   }
 
   let body: Record<string, unknown>;
@@ -484,6 +518,146 @@ Deno.serve(async (request: Request) => {
     body = await request.json();
   } catch {
     return json(400, { ok: false, error: "invalid_json" });
+  }
+
+  if (body.action === "delete_measurement") {
+    const eventId = normalizeEventId(body.event_id);
+    if (!ID_PATTERN.test(eventId)) {
+      return json(422, { ok: false, error: "invalid_event_id" });
+    }
+    const supabaseUrl = Deno.env.get("SUPABASE_URL");
+    const serviceKey = getSupabaseAdminKey();
+    if (!supabaseUrl || !serviceKey) {
+      return json(500, { ok: false, error: "supabase_not_configured" });
+    }
+    const supabase = createClient(supabaseUrl, serviceKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+    let deleted = false;
+    const byEvent = await supabase
+      .from(MEASUREMENT_TABLE)
+      .delete()
+      .eq("event_id", eventId)
+      .select("id,event_id");
+    if (!byEvent.error && Array.isArray(byEvent.data) && byEvent.data.length) {
+      deleted = true;
+    } else {
+      const byId = await supabase
+        .from(MEASUREMENT_TABLE)
+        .delete()
+        .eq("id", eventId)
+        .select("id,event_id");
+      if (!byId.error && Array.isArray(byId.data) && byId.data.length) {
+        deleted = true;
+      } else if (byEvent.error || byId.error) {
+        return json(500, { ok: false, error: "measurement_delete_failed" });
+      }
+    }
+    if (!deleted) {
+      return json(404, { ok: false, error: "measurement_not_found" });
+    }
+    return json(200, { ok: true, deleted: true, event_id: eventId });
+  }
+
+  if (body.action === "update_measurement") {
+    const eventId = normalizeEventId(body.event_id);
+    if (!ID_PATTERN.test(eventId)) {
+      return json(422, { ok: false, error: "invalid_event_id" });
+    }
+    const qrCode = typeof body.qr_code === "string" ? body.qr_code.trim() : "";
+    const coreWeight = Number(body.core_weight ?? body.weight);
+    const productWeight = Number(body.product_weight);
+    const workDate = typeof body.work_date === "string" ? body.work_date.trim() : "";
+    const shift = typeof body.shift === "string" ? body.shift.trim() : "";
+    const machine = typeof body.machine === "string" ? body.machine.trim() : "";
+    const productionOrder = typeof body.production_order === "string"
+      ? body.production_order.trim()
+      : "";
+    if (!qrCode || qrCode.length > 200) {
+      return json(422, { ok: false, error: "invalid_qr_code" });
+    }
+    if (!Number.isFinite(coreWeight) || coreWeight < 0) {
+      return json(422, { ok: false, error: "invalid_core_weight" });
+    }
+    if (!Number.isFinite(productWeight) || productWeight < 0) {
+      return json(422, { ok: false, error: "invalid_product_weight" });
+    }
+    const supabaseUrl = Deno.env.get("SUPABASE_URL");
+    const serviceKey = getSupabaseAdminKey();
+    if (!supabaseUrl || !serviceKey) {
+      return json(500, { ok: false, error: "supabase_not_configured" });
+    }
+    const supabase = createClient(supabaseUrl, serviceKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+    const byEventId = await supabase
+      .from(MEASUREMENT_TABLE)
+      .select(EVENT_SELECT)
+      .eq("event_id", eventId)
+      .maybeSingle();
+    let existing = (!byEventId.error && byEventId.data)
+      ? byEventId.data as Record<string, unknown>
+      : null;
+    if (!existing) {
+      const numericId = /^\d+$/.test(eventId) ? Number(eventId) : NaN;
+      const byId = await supabase
+        .from(MEASUREMENT_TABLE)
+        .select(EVENT_SELECT)
+        .eq("id", Number.isFinite(numericId) ? numericId : eventId)
+        .maybeSingle();
+      if (!byId.error && byId.data) {
+        existing = byId.data as Record<string, unknown>;
+      }
+    }
+    if (!existing) {
+      return json(404, { ok: false, error: "measurement_not_found" });
+    }
+    if (coreWeight > productWeight) {
+      return json(422, {
+        ok: false,
+        error: "core_exceeds_product_weight",
+        message: "Cân lõi phải ≤ cân SP (ràng buộc bảng can_tu_dong).",
+      });
+    }
+    const metadata = existing.metadata !== null && typeof existing.metadata === "object"
+      ? { ...(existing.metadata as Record<string, unknown>) }
+      : {};
+    metadata.core_weight = coreWeight;
+    metadata.product_weight = productWeight;
+    if (workDate) metadata.work_date = workDate;
+    if (shift) metadata.shift = shift;
+    if (machine) metadata.machine = machine;
+    if (productionOrder) metadata.production_order = productionOrder;
+    const raw = typeof metadata.weight_raw === "string" ? metadata.weight_raw : "";
+    metadata.weight_raw = raw.includes("PRODUCT_WEIGHT=")
+      ? raw.replace(/(?:^|; )PRODUCT_WEIGHT=[^;]*/g, `; PRODUCT_WEIGHT=${productWeight}`).replace(/^; /, "")
+      : `${raw ? `${raw}; ` : ""}PRODUCT_WEIGHT=${productWeight}`;
+    const rowId = typeof existing.id === "number" || typeof existing.id === "string"
+      ? existing.id
+      : null;
+    if (rowId === null || rowId === "") {
+      return json(500, { ok: false, error: "measurement_update_failed", detail: "missing_row_id" });
+    }
+    const { data: updated, error: updateError } = await supabase
+      .from(MEASUREMENT_TABLE)
+      .update({
+        qr_code: qrCode,
+        weight: productWeight,
+        tare_weight: coreWeight,
+        metadata,
+      })
+      .eq("id", rowId)
+      .select(EVENT_SELECT)
+      .maybeSingle();
+    if (updateError || !updated) {
+      return json(500, {
+        ok: false,
+        error: "measurement_update_failed",
+        detail: updateError?.message || "empty_update",
+        code: updateError?.code || null,
+      });
+    }
+    return json(200, { ok: true, updated: true, item: updated });
   }
 
   if (body.action === "codex-auth" || body.action === "encrypted-secret") {

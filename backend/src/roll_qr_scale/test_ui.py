@@ -44,6 +44,7 @@ from .api_client import (
     fetch_supabase_rows,
     fetch_supabase_table,
     fetch_supabase_table_count,
+    mutate_remote_measurement,
     persist_product_evidence,
     sign_storage_image,
 )
@@ -465,6 +466,42 @@ def _ingest_api_token() -> str:
     )
 
 
+def _fetch_ingest_measurements_paged(
+    api_url: str,
+    api_token: str,
+    *,
+    limit: int,
+    date_from: str = "",
+    date_to: str = "",
+    shift: str = "",
+    qr_code: str = "",
+) -> list[dict[str, object]]:
+    """Pull cloud rows in pages until the requested window is filled."""
+
+    page_size = 200
+    wanted = max(1, min(int(limit), 2000))
+    items: list[dict[str, object]] = []
+    offset = 0
+    for _ in range(25):
+        batch = fetch_remote_measurements(
+            api_url,
+            api_token,
+            limit=page_size,
+            offset=offset,
+            date_from=date_from,
+            date_to=date_to,
+            shift=shift,
+            qr_code=qr_code,
+        )
+        if not batch:
+            break
+        items.extend(batch)
+        if len(batch) < page_size or len(items) >= wanted:
+            break
+        offset += len(batch)
+    return items[:wanted]
+
+
 def _looks_like_measurement_items(items: list[dict[str, object]]) -> bool:
     if not items:
         return False
@@ -845,13 +882,22 @@ def _matches_source_filters(
     item: dict[str, object],
     *,
     work_date: str = "",
+    date_from: str = "",
+    date_to: str = "",
     shift: str = "",
     machine: str = "",
     production_order: str = "",
+    qr_code: str = "",
 ) -> bool:
+    needs_date = bool(work_date or date_from or date_to)
+    item_date = _item_source_date(item) if needs_date else ""
     if work_date:
-        item_date = _item_source_date(item)
         if item_date != work_date:
+            return False
+    else:
+        if date_from and (not item_date or item_date < date_from):
+            return False
+        if date_to and (not item_date or item_date > date_to):
             return False
     if shift:
         item_shift = _item_source_value(item, "shift", "SOURCE_SHIFT")
@@ -869,6 +915,11 @@ def _matches_source_filters(
             item, "production_order", "SOURCE_PRODUCTION_ORDER"
         )
         if item_order and item_order != production_order:
+            return False
+    if qr_code:
+        needle = str(qr_code).strip().casefold()
+        haystack = str(item.get("qr_code") or "").strip().casefold()
+        if not needle or needle not in haystack:
             return False
     return True
 
@@ -922,9 +973,12 @@ def _local_measurement_items(
     limit: int,
     *,
     work_date: str = "",
+    date_from: str = "",
+    date_to: str = "",
     shift: str = "",
     machine: str = "",
     production_order: str = "",
+    qr_code: str = "",
 ) -> list[dict[str, object]]:
     items: list[dict[str, object]] = []
     for item in store.recent(max(limit, 200)):
@@ -949,6 +1003,11 @@ def _local_measurement_items(
             if has_product
             else None
         )
+        source_item = {
+            "captured_at": item.captured_at,
+            "weight_raw": item.weight_raw or "",
+            "qr_code": item.qr_code,
+        }
         payload = {
             "event_id": item.event_id,
             "qr_code": item.qr_code,
@@ -962,6 +1021,12 @@ def _local_measurement_items(
             ),
             "unit": item.unit,
             "captured_at": item.captured_at,
+            "work_date": _item_source_date(source_item),
+            "shift": _item_source_value(source_item, "shift", "SOURCE_SHIFT"),
+            "machine": _item_source_value(source_item, "machine", "SOURCE_MACHINE"),
+            "production_order": _item_source_value(
+                source_item, "production_order", "SOURCE_PRODUCTION_ORDER"
+            ),
             "sync_status": item.sync_status,
             "sync_error": item.sync_error,
             "core_image_url": core_url,
@@ -972,9 +1037,12 @@ def _local_measurement_items(
         if _matches_source_filters(
             payload,
             work_date=work_date,
+            date_from=date_from,
+            date_to=date_to,
             shift=shift,
             machine=machine,
             production_order=production_order,
+            qr_code=qr_code,
         ):
             items.append(payload)
         if len(items) >= limit:
@@ -986,9 +1054,12 @@ def _local_measurement_event_ids(
     store: MeasurementStore,
     *,
     work_date: str = "",
+    date_from: str = "",
+    date_to: str = "",
     shift: str = "",
     machine: str = "",
     production_order: str = "",
+    qr_code: str = "",
     unsynced_only: bool = False,
 ) -> set[str]:
     event_ids: set[str] = set()
@@ -998,9 +1069,12 @@ def _local_measurement_event_ids(
         if _matches_source_filters(
             item,
             work_date=work_date,
+            date_from=date_from,
+            date_to=date_to,
             shift=shift,
             machine=machine,
             production_order=production_order,
+            qr_code=qr_code,
         ):
             event_id = str(item.get("event_id") or "").strip()
             if event_id:
@@ -1019,9 +1093,12 @@ def _local_error_parent_ids(
     store: MeasurementStore,
     *,
     work_date: str = "",
+    date_from: str = "",
+    date_to: str = "",
     shift: str = "",
     machine: str = "",
     production_order: str = "",
+    qr_code: str = "",
     unsynced_only: bool = False,
 ) -> set[str]:
     parent_ids: set[str] = set()
@@ -1031,9 +1108,12 @@ def _local_error_parent_ids(
         if _matches_source_filters(
             item,
             work_date=work_date,
+            date_from=date_from,
+            date_to=date_to,
             shift=shift,
             machine=machine,
             production_order=production_order,
+            qr_code=qr_code,
         ):
             parent_id = str(
                 item.get("parent_event_id") or item.get("event_id") or ""
@@ -1102,10 +1182,177 @@ def decode_image(value: str) -> np.ndarray:
         raw = base64.b64decode(encoded, validate=True)
     except (binascii.Error, ValueError) as exc:
         raise ValueError("Ảnh base64 không hợp lệ") from exc
+    return decode_image_bytes(raw)
+
+
+def decode_image_bytes(raw: bytes) -> np.ndarray:
+    if len(raw) > MAX_REQUEST_BYTES:
+        raise ValueError("Ảnh quá lớn")
     frame = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
     if frame is None:
         raise ValueError("Không giải mã được ảnh")
     return frame
+
+
+def _upsert_raw_tag(raw: str, name: str, value: str) -> str:
+    raw = str(raw or "").strip()
+    token = f"{name}={value}"
+    pattern = rf"(?:^|; )\s*{re.escape(name)}=[^;]*"
+    if re.search(pattern, raw):
+        return re.sub(pattern, f"; {token}", raw).lstrip("; ").strip()
+    if not raw:
+        return token
+    return f"{raw}; {token}"
+
+
+def _download_image_bytes(url: str, *, timeout: float = 45.0) -> bytes:
+    url = str(url or "").strip()
+    if not url:
+        raise ValueError("Thiếu URL ảnh")
+    if url.startswith("/") or "://" not in url:
+        raise ValueError("URL ảnh không hợp lệ")
+    request = urllib.request.Request(
+        url,
+        headers={"Accept": "image/*,*/*", "User-Agent": "roll-qr-scale-reread/1.0"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = response.read()
+    except urllib.error.HTTPError as exc:
+        raise ValueError(f"Không tải được ảnh (HTTP {exc.code})") from exc
+    except urllib.error.URLError as exc:
+        raise ValueError(f"Không tải được ảnh: {exc.reason}") from exc
+    if not data:
+        raise ValueError("Ảnh trống")
+    if len(data) > MAX_REQUEST_BYTES:
+        raise ValueError("Ảnh quá lớn")
+    return data
+
+
+def _resolve_measurement_image_bytes(
+    store: MeasurementStore,
+    *,
+    event_id: str,
+    kind: str,
+    image_url: str = "",
+) -> tuple[bytes, str]:
+    kind = kind if kind in {"core", "product"} else ""
+    if not kind:
+        raise ValueError("kind phải là core hoặc product")
+    local = store.get(event_id)
+    if local is not None:
+        local_path = Path(
+            local.image_path if kind == "core" else local.product_image_path
+        )
+        if local_path.is_file():
+            return local_path.read_bytes(), f"local:{local_path.name}"
+        if kind == "core" and local.remote_image_url:
+            image_url = image_url or local.remote_image_url
+    image_url = str(image_url or "").strip()
+    if image_url.startswith("/api/measurement-image"):
+        if local is None:
+            raise ValueError("Không có ảnh local cho event này")
+        local_path = Path(
+            local.image_path if kind == "core" else local.product_image_path
+        )
+        if not local_path.is_file():
+            raise ValueError("Không tìm thấy file ảnh local")
+        return local_path.read_bytes(), f"local:{local_path.name}"
+    if image_url:
+        return _download_image_bytes(image_url), image_url
+    raise ValueError(
+        "Không có ảnh "
+        + ("lõi" if kind == "core" else "SP")
+        + " để AI đọc lại"
+    )
+
+
+def _persist_measurement_edit(
+    store: MeasurementStore,
+    *,
+    event_id: str,
+    qr_code: str,
+    core_weight: float,
+    product_weight: float,
+    work_date: str = "",
+    shift: str = "",
+    machine: str = "",
+    production_order: str = "",
+    weight_raw: str = "",
+) -> dict[str, object]:
+    remote_item: dict[str, object] | None = None
+    cloud_error = ""
+    ingest_url = _ingest_api_url()
+    ingest_token = _ingest_api_token()
+    if ingest_url and ingest_token:
+        try:
+            remote = mutate_remote_measurement(
+                ingest_url,
+                ingest_token,
+                action="update_measurement",
+                event_id=event_id,
+                payload={
+                    "qr_code": qr_code,
+                    "core_weight": core_weight,
+                    "product_weight": product_weight,
+                    "work_date": work_date,
+                    "shift": shift,
+                    "machine": machine,
+                    "production_order": production_order,
+                },
+            )
+            item = remote.get("item")
+            if isinstance(item, dict):
+                remote_item = item
+        except Exception as exc:
+            cloud_error = str(exc)
+    persist_raw = str(weight_raw or "").strip()
+    if not persist_raw:
+        if work_date:
+            persist_raw = _upsert_raw_tag(persist_raw, "SOURCE_DATE", work_date)
+        if shift:
+            persist_raw = _upsert_raw_tag(persist_raw, "SOURCE_SHIFT", shift)
+        if machine:
+            persist_raw = _upsert_raw_tag(persist_raw, "SOURCE_MACHINE", machine)
+        if production_order:
+            persist_raw = _upsert_raw_tag(
+                persist_raw, "SOURCE_PRODUCTION_ORDER", production_order
+            )
+        persist_raw = _upsert_raw_tag(persist_raw, "PRODUCT_WEIGHT", f"{product_weight:g}")
+    local_item = None
+    try:
+        local_item = store.update_measurement_fields(
+            event_id,
+            qr_code=qr_code,
+            weight=core_weight,
+            product_weight=product_weight,
+            weight_raw=persist_raw,
+        )
+    except KeyError:
+        if remote_item is None:
+            raise ValueError(
+                cloud_error or "Không tìm thấy dòng để sửa trên cloud/local"
+            ) from None
+    return {
+        "ok": True,
+        "updated": True,
+        "event_id": event_id,
+        "cloud_updated": remote_item is not None,
+        "local_updated": local_item is not None,
+        "cloud_error": cloud_error or None,
+        "item": {
+            "event_id": event_id,
+            "qr_code": qr_code,
+            "core_weight": core_weight,
+            "product_weight": product_weight,
+            "work_date": work_date,
+            "shift": shift,
+            "machine": machine,
+            "production_order": production_order,
+            "weight_raw": persist_raw,
+        },
+    }
 
 
 class StationUIService:
@@ -3487,108 +3734,122 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                 except ValueError:
                     limit = 50
                 work_date = str(query.get("work_date", [""])[0]).strip()
+                date_from = str(query.get("date_from", [""])[0]).strip()
+                date_to = str(query.get("date_to", [""])[0]).strip()
                 shift = str(query.get("shift", [""])[0]).strip()
                 machine = str(query.get("machine", [""])[0]).strip()
                 production_order = str(query.get("production_order", [""])[0]).strip()
+                qr_code = str(query.get("qr_code", [""])[0]).strip()
+                list_filters = {
+                    "work_date": work_date,
+                    "date_from": date_from,
+                    "date_to": date_to,
+                    "shift": shift,
+                    "machine": machine,
+                    "production_order": production_order,
+                    "qr_code": qr_code,
+                }
                 local_total_count, local_error_count = _local_production_counts(
                     store,
-                    work_date=work_date,
-                    shift=shift,
-                    machine=machine,
-                    production_order=production_order,
+                    **list_filters,
                 )
                 supabase_url = _supabase_project_url()
                 publishable_key = _supabase_read_key()
-                if not supabase_url or not publishable_key:
+                ingest_url = _ingest_api_url()
+                ingest_token = _ingest_api_token()
+                remote_items: list[dict[str, object]] | None = None
+                remote_source = ""
+                fallback_error = ""
+                if supabase_url and publishable_key:
+                    try:
+                        remote_items = fetch_supabase_table(
+                            supabase_url,
+                            publishable_key,
+                            limit=max(limit, 200),
+                        )
+                        remote_source = "can_tu_dong"
+                    except Exception as exc:
+                        fallback_error = str(exc)
+                if remote_items is None and ingest_url and ingest_token:
+                    try:
+                        remote_items = _fetch_ingest_measurements_paged(
+                            ingest_url,
+                            ingest_token,
+                            limit=max(limit, 500),
+                            date_from=date_from,
+                            date_to=date_to,
+                            shift=shift,
+                            qr_code=qr_code,
+                        )
+                        remote_source = "can_tu_dong:ingest"
+                    except Exception as exc:
+                        fallback_error = "; ".join(
+                            value for value in (fallback_error, str(exc)) if value
+                        )
+                if remote_items is None:
                     self.send_json(
                         200,
                         {
                             "ok": True,
                             "source": "local",
+                            "fallback_error": fallback_error or None,
                             "work_date": work_date,
+                            "date_from": date_from,
+                            "date_to": date_to,
                             "shift": shift,
                             "machine": machine,
                             "production_order": production_order,
+                            "qr_code": qr_code,
                             "total_count": local_total_count,
                             "error_count": local_error_count,
                             "count_exact": True,
                             "items": _local_measurement_items(
                                 store,
                                 limit,
-                                work_date=work_date,
-                                shift=shift,
-                                machine=machine,
-                                production_order=production_order,
-                            ),
-                        },
-                    )
-                    return
-                try:
-                    remote_items = fetch_supabase_table(
-                        supabase_url,
-                        publishable_key,
-                        limit=max(limit, 200),
-                    )
-                except Exception as exc:
-                    # Keep the operator UI usable when REST keys are missing/wrong.
-                    self.send_json(
-                        200,
-                        {
-                            "ok": True,
-                            "source": "local",
-                            "fallback_error": str(exc),
-                            "work_date": work_date,
-                            "shift": shift,
-                            "machine": machine,
-                            "production_order": production_order,
-                            "total_count": local_total_count,
-                            "error_count": local_error_count,
-                            "count_exact": True,
-                            "items": _local_measurement_items(
-                                store,
-                                limit,
-                                work_date=work_date,
-                                shift=shift,
-                                machine=machine,
-                                production_order=production_order,
+                                **list_filters,
                             ),
                         },
                     )
                     return
                 count_error = ""
-                try:
-                    remote_total_count = fetch_supabase_table_count(
-                        supabase_url,
-                        publishable_key,
-                        work_date=work_date,
-                        shift=shift,
-                        machine=machine,
-                        production_order=production_order,
-                    )
-                except Exception as exc:
-                    remote_total_count = None
-                    count_error = str(exc)
-                remote_error_parent_ids: set[str] | None
-                try:
-                    remote_error_parent_ids = fetch_supabase_photo_draft_parent_ids(
-                        supabase_url,
-                        publishable_key,
-                        work_date=work_date,
-                        shift=shift,
-                        machine=machine,
-                        production_order=production_order,
-                    )
-                except Exception as exc:
-                    remote_error_parent_ids = None
-                    count_error = "; ".join(
-                        value for value in (count_error, str(exc)) if value
-                    )
+                remote_total_count: int | None = None
+                if supabase_url and publishable_key and remote_source == "can_tu_dong":
+                    try:
+                        remote_total_count = fetch_supabase_table_count(
+                            supabase_url,
+                            publishable_key,
+                            **list_filters,
+                        )
+                    except Exception as exc:
+                        count_error = str(exc)
+                remote_error_parent_ids: set[str] | None = None
+                if supabase_url and publishable_key:
+                    try:
+                        remote_error_parent_ids = fetch_supabase_photo_draft_parent_ids(
+                            supabase_url,
+                            publishable_key,
+                            work_date=work_date,
+                            shift=shift,
+                            machine=machine,
+                            production_order=production_order,
+                        )
+                    except Exception as exc:
+                        remote_error_parent_ids = None
+                        count_error = "; ".join(
+                            value for value in (count_error, str(exc)) if value
+                        )
                 items = []
                 for item in remote_items:
                     core_url = item.get("core_image_url") or item.get("image_url")
                     product_url = item.get("product_image_url")
                     product_path = item.get("product_image_path")
-                    if not product_url and isinstance(product_path, str) and product_path:
+                    if (
+                        not product_url
+                        and isinstance(product_path, str)
+                        and product_path
+                        and supabase_url
+                        and publishable_key
+                    ):
                         try:
                             product_url = sign_storage_image(
                                 supabase_url,
@@ -3598,8 +3859,10 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         except Exception:
                             pass
                     metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-                    raw_weight = str(metadata.get("weight_raw", ""))
+                    raw_weight = str(metadata.get("weight_raw", "") or item.get("weight_raw", ""))
                     product_weight_value = item.get("product_weight")
+                    if product_weight_value is None:
+                        product_weight_value = metadata.get("product_weight")
                     if product_weight_value is None:
                         match = re.search(
                             r"(?:^|; )PRODUCT_WEIGHT=([0-9]+(?:\.[0-9]+)?)",
@@ -3611,7 +3874,10 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         tare_value = item.get("tare_weight")
                         core_weight_value = tare_value if tare_value not in (None, 0, 0.0) else item.get("weight")
                     payload = {
-                        "event_id": item.get("event_id", ""),
+                        "event_id": str(
+                            item.get("event_id") or item.get("id") or ""
+                        ),
+                        "row_id": item.get("id"),
                         "qr_code": item.get("qr_code", ""),
                         "core_weight": core_weight_value,
                         "product_weight": product_weight_value,
@@ -3645,20 +3911,12 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     }
                     if _matches_source_filters(
                         payload,
-                        work_date=work_date,
-                        shift=shift,
-                        machine=machine,
-                        production_order=production_order,
+                        **list_filters,
                     ):
                         items.append(payload)
                     if len(items) >= limit:
                         break
-                filters = {
-                    "work_date": work_date,
-                    "shift": shift,
-                    "machine": machine,
-                    "production_order": production_order,
-                }
+                filters = list_filters
                 local_measurement_ids = _local_measurement_event_ids(store, **filters)
                 local_unsynced_measurement_ids = _local_measurement_event_ids(
                     store,
@@ -3675,25 +3933,31 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     else _local_error_parent_ids(store, **filters) - local_measurement_ids
                 )
                 error_count = len(error_parent_ids)
-                measurement_count = (
-                    remote_total_count + len(local_unsynced_measurement_ids)
-                    if remote_total_count is not None
-                    else max(_local_measurement_count(store, **filters), len(items))
-                )
-                count_exact = (
-                    remote_total_count is not None
-                    and remote_error_parent_ids is not None
-                )
+                if remote_total_count is not None:
+                    measurement_count = remote_total_count + len(
+                        local_unsynced_measurement_ids
+                    )
+                    count_exact = remote_error_parent_ids is not None
+                else:
+                    # Ingest GET has no filtered count; use returned window size.
+                    measurement_count = max(len(items), len(local_unsynced_measurement_ids))
+                    count_exact = False
+                    if not count_error:
+                        count_error = "Đếm gần đúng theo cửa sổ dữ liệu cloud gần nhất"
                 total_count = measurement_count + error_count
                 self.send_json(
                     200,
                     {
                         "ok": True,
-                        "source": "can_tu_dong",
+                        "source": remote_source or "can_tu_dong",
+                        "fallback_error": fallback_error or None,
                         "work_date": work_date,
+                        "date_from": date_from,
+                        "date_to": date_to,
                         "shift": shift,
                         "machine": machine,
                         "production_order": production_order,
+                        "qr_code": qr_code,
                         "total_count": total_count,
                         "error_count": error_count,
                         "count_exact": count_exact,
@@ -3819,6 +4083,308 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         event_id=str(payload["event_id"]) if payload.get("event_id") else None,
                     )
                     self.send_json(200, {"ok": True, "discarded": discarded})
+                    return
+                if self.path == "/api/measurements/delete":
+                    event_id = str(payload.get("event_id") or "").strip()
+                    if not event_id:
+                        raise ValueError("Thiếu event_id")
+                    cloud_deleted = False
+                    cloud_error = ""
+                    ingest_url = _ingest_api_url()
+                    ingest_token = _ingest_api_token()
+                    if ingest_url and ingest_token:
+                        try:
+                            mutate_remote_measurement(
+                                ingest_url,
+                                ingest_token,
+                                action="delete_measurement",
+                                event_id=event_id,
+                            )
+                            cloud_deleted = True
+                        except Exception as exc:
+                            cloud_error = str(exc)
+                    local_deleted = store.delete_measurement(event_id)
+                    if not cloud_deleted and not local_deleted:
+                        raise ValueError(
+                            cloud_error or "Không tìm thấy dòng để xóa trên cloud/local"
+                        )
+                    self.send_json(
+                        200,
+                        {
+                            "ok": True,
+                            "deleted": True,
+                            "event_id": event_id,
+                            "cloud_deleted": cloud_deleted,
+                            "local_deleted": local_deleted,
+                            "cloud_error": cloud_error or None,
+                        },
+                    )
+                    return
+                if self.path == "/api/measurements/update":
+                    event_id = str(payload.get("event_id") or "").strip()
+                    qr_code = str(payload.get("qr_code") or "").strip()
+                    work_date = str(payload.get("work_date") or "").strip()
+                    shift = str(payload.get("shift") or "").strip()
+                    machine = str(payload.get("machine") or "").strip()
+                    production_order = str(payload.get("production_order") or "").strip()
+                    try:
+                        core_weight = float(payload.get("core_weight"))
+                        product_weight = float(payload.get("product_weight"))
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError("Khối lượng không hợp lệ") from exc
+                    if not event_id:
+                        raise ValueError("Thiếu event_id")
+                    if not qr_code:
+                        raise ValueError("Mã SP không được trống")
+                    if core_weight < 0 or product_weight < 0:
+                        raise ValueError("Khối lượng phải ≥ 0")
+                    if core_weight > product_weight:
+                        raise ValueError(
+                            "Cân lõi phải ≤ cân SP (ràng buộc DB: tare ≤ weight)"
+                        )
+                    self.send_json(
+                        200,
+                        _persist_measurement_edit(
+                            store,
+                            event_id=event_id,
+                            qr_code=qr_code,
+                            core_weight=core_weight,
+                            product_weight=product_weight,
+                            work_date=work_date,
+                            shift=shift,
+                            machine=machine,
+                            production_order=production_order,
+                        ),
+                    )
+                    return
+                if self.path == "/api/measurements/reread":
+                    event_id = str(payload.get("event_id") or "").strip()
+                    kind = str(payload.get("kind") or "").strip().lower()
+                    image_url = str(payload.get("image_url") or "").strip()
+                    qr_code = str(payload.get("qr_code") or "").strip()
+                    work_date = str(payload.get("work_date") or "").strip()
+                    shift = str(payload.get("shift") or "").strip()
+                    machine = str(payload.get("machine") or "").strip()
+                    production_order = str(
+                        payload.get("production_order") or ""
+                    ).strip()
+                    unit = str(payload.get("unit") or "kg").strip() or "kg"
+                    recognition_profile = str(
+                        payload.get("recognition_profile") or "fast"
+                    )
+                    recognition_provider = str(
+                        payload.get("recognition_provider") or "gemini"
+                    )
+                    if not event_id:
+                        raise ValueError("Thiếu event_id")
+                    if kind not in {"core", "product"}:
+                        raise ValueError("kind phải là core hoặc product")
+                    local = store.get(event_id)
+                    previous_core: float | None = None
+                    previous_product: float | None = None
+                    previous_qr = qr_code
+                    weight_raw = str(payload.get("weight_raw") or "").strip()
+                    if local is not None:
+                        previous_qr = previous_qr or str(local.qr_code or "").strip()
+                        qr_code = previous_qr
+                        previous_core = float(local.weight)
+                        if local.product_weight is not None:
+                            previous_product = float(local.product_weight)
+                        weight_raw = weight_raw or (local.weight_raw or "")
+                        if not work_date:
+                            work_date = _item_source_date(
+                                {
+                                    "captured_at": local.captured_at,
+                                    "weight_raw": local.weight_raw or "",
+                                }
+                            )
+                        if not shift:
+                            shift = _item_source_value(
+                                {
+                                    "weight_raw": local.weight_raw or "",
+                                },
+                                "shift",
+                                "SOURCE_SHIFT",
+                            )
+                        if not machine:
+                            machine = _item_source_value(
+                                {"weight_raw": local.weight_raw or ""},
+                                "machine",
+                                "SOURCE_MACHINE",
+                            )
+                        if not production_order:
+                            production_order = _item_source_value(
+                                {"weight_raw": local.weight_raw or ""},
+                                "production_order",
+                                "SOURCE_PRODUCTION_ORDER",
+                            )
+                        unit = unit or local.unit or "kg"
+                    try:
+                        if previous_core is None:
+                            previous_core = float(payload.get("core_weight"))
+                        if previous_product is None:
+                            previous_product = float(payload.get("product_weight"))
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(
+                            "Thiếu khối lượng hiện tại để đọc lại"
+                        ) from exc
+                    image_bytes, image_source = _resolve_measurement_image_bytes(
+                        store,
+                        event_id=event_id,
+                        kind=kind,
+                        image_url=image_url,
+                    )
+                    frame = decode_image_bytes(image_bytes)
+                    client_qr = str(payload.get("client_qr_code") or "").strip()
+                    # Đọc SP: không gửi mã cũ để decoder lấy lại QR từ ảnh.
+                    # Đọc lõi: giữ mã hiện có, không đọc QR.
+                    analysis = service.analyze(
+                        frame,
+                        "auto",
+                        unit,
+                        recognition_profile=recognition_profile,
+                        recognition_provider=recognition_provider,
+                        capture_kind=kind,
+                        client_qr_code=client_qr if kind == "product" else previous_qr,
+                    )
+                    if not analysis.get("weight_found"):
+                        raise ValueError(
+                            "AI không đọc được số cân từ ảnh "
+                            + ("lõi" if kind == "core" else "SP")
+                        )
+                    try:
+                        new_weight = float(analysis.get("weight"))
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError("AI trả số cân không hợp lệ") from exc
+                    if new_weight < 0:
+                        raise ValueError("Số cân AI đọc được không hợp lệ")
+                    core_weight = previous_core
+                    product_weight = previous_product
+                    read_qr = ""
+                    qr_found = False
+                    qr_conflict = False
+                    qr_decoder = ""
+                    # QR luôn theo decoder cân (local YOLO/zxing + browser), không lấy QR từ AI.
+                    if kind == "product":
+                        if len(client_qr) > 512 or any(
+                            ord(character) < 32 for character in client_qr
+                        ):
+                            raise ValueError("Mã QR từ trình duyệt không hợp lệ")
+                        decoded = service.decode_qr(frame)
+                        local_qr = (
+                            str(decoded.get("qr_code") or "").strip()
+                            if decoded.get("found")
+                            else ""
+                        )
+                        if client_qr and local_qr and client_qr != local_qr:
+                            qr_conflict = True
+                            qr_decoder = "browser+backend-conflict"
+                        elif local_qr:
+                            read_qr = local_qr
+                            qr_found = True
+                            qr_decoder = f"camera:{decoded.get('decoder', 'local')}"
+                            if client_qr:
+                                qr_decoder += "+browser-confirmed"
+                        elif client_qr:
+                            read_qr = client_qr
+                            qr_found = True
+                            qr_decoder = "browser-barcode-detector"
+                    if kind == "core":
+                        core_weight = new_weight
+                        weight_raw = _upsert_raw_tag(
+                            weight_raw, "HUMAN_CONFIRMED_CORE", f"{new_weight:g}"
+                        )
+                        weight_raw = _upsert_raw_tag(
+                            weight_raw, "REREAD_CORE", f"{new_weight:g}"
+                        )
+                    else:
+                        product_weight = new_weight
+                        weight_raw = _upsert_raw_tag(
+                            weight_raw, "PRODUCT_WEIGHT", f"{new_weight:g}"
+                        )
+                        weight_raw = _upsert_raw_tag(
+                            weight_raw,
+                            "HUMAN_CONFIRMED_PRODUCT",
+                            f"{new_weight:g}",
+                        )
+                        weight_raw = _upsert_raw_tag(
+                            weight_raw, "REREAD_PRODUCT", f"{new_weight:g}"
+                        )
+                        if read_qr:
+                            qr_code = read_qr
+                            weight_raw = _upsert_raw_tag(
+                                weight_raw, "PRODUCT_ENTRY_CODE", read_qr
+                            )
+                            weight_raw = _upsert_raw_tag(
+                                weight_raw, "REREAD_QR", read_qr
+                            )
+                            weight_raw = _upsert_raw_tag(
+                                weight_raw, "REREAD_QR_DECODER", qr_decoder[:80]
+                            )
+                    if not str(qr_code or "").strip():
+                        raise ValueError(
+                            "Thiếu mã QR"
+                            + (
+                                " và không đọc lại được từ ảnh SP"
+                                if kind == "product"
+                                else ""
+                            )
+                        )
+                    if float(core_weight) > float(product_weight):
+                        raise ValueError(
+                            "Cân lõi phải ≤ cân SP sau khi đọc lại "
+                            f"({core_weight:g} > {product_weight:g})"
+                        )
+                    ai_raw = str(analysis.get("weight_raw") or "").strip()
+                    if ai_raw:
+                        weight_raw = _upsert_raw_tag(
+                            weight_raw,
+                            "REREAD_AI_RAW",
+                            ai_raw.replace(";", ",")[:180],
+                        )
+                    persisted = _persist_measurement_edit(
+                        store,
+                        event_id=event_id,
+                        qr_code=qr_code,
+                        core_weight=float(core_weight),
+                        product_weight=float(product_weight),
+                        work_date=work_date,
+                        shift=shift,
+                        machine=machine,
+                        production_order=production_order,
+                        weight_raw=weight_raw,
+                    )
+                    product_code = ""
+                    if read_qr:
+                        if "_" in read_qr:
+                            product_code = read_qr.split("_", 1)[0].strip()
+                        elif "-" in read_qr:
+                            product_code = read_qr.split("-", 1)[0].strip()
+                        else:
+                            product_code = read_qr
+                    persisted.update(
+                        {
+                            "kind": kind,
+                            "previous_core_weight": previous_core,
+                            "previous_product_weight": previous_product,
+                            "previous_qr_code": previous_qr,
+                            "read_weight": new_weight,
+                            "read_qr_code": read_qr or None,
+                            "qr_found": qr_found,
+                            "qr_conflict": qr_conflict,
+                            "qr_decoder": qr_decoder or None,
+                            "product_code": product_code or None,
+                            "image_source": image_source,
+                            "weight_found": True,
+                            "quality_pass": bool(analysis.get("quality_pass")),
+                            "recognition_source": analysis.get("recognition_source"),
+                            "recognition_provider": analysis.get(
+                                "recognition_provider"
+                            ),
+                            "weight_raw_ai": ai_raw or None,
+                        }
+                    )
+                    self.send_json(200, persisted)
                     return
                 if self.path == "/api/codex/login":
                     if service.codex_reader is None:

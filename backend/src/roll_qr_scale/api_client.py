@@ -39,17 +39,77 @@ def fetch_remote_measurements(
     token: str,
     *,
     limit: int = 50,
-    timeout: float = 10.0,
+    offset: int = 0,
+    date_from: str = "",
+    date_to: str = "",
+    shift: str = "",
+    qr_code: str = "",
+    timeout: float = 30.0,
 ) -> list[dict[str, object]]:
-    parsed = fetch_remote_json(
-        url, token, params={"limit": max(1, min(limit, 200))}, timeout=timeout
-    )
+    params: dict[str, object] = {
+        "limit": max(1, min(limit, 1000)),
+        "offset": max(0, int(offset)),
+    }
+    if date_from:
+        params["date_from"] = date_from
+    if date_to:
+        params["date_to"] = date_to
+    if shift:
+        params["shift"] = shift
+    if qr_code:
+        params["qr_code"] = qr_code
+    parsed = fetch_remote_json(url, token, params=params, timeout=timeout)
     if parsed.get("ok") is not True:
         raise RuntimeError("Supabase list response is invalid")
     items = parsed.get("items")
     if not isinstance(items, list):
         raise RuntimeError("Supabase list response has no items")
     return [item for item in items if isinstance(item, dict)]
+
+
+def mutate_remote_measurement(
+    url: str,
+    token: str,
+    *,
+    action: str,
+    event_id: str,
+    payload: dict[str, object] | None = None,
+    timeout: float = 30.0,
+) -> dict[str, object]:
+    body = {"action": action, "event_id": str(event_id).strip()}
+    if payload:
+        body.update(payload)
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "X-Device-Token": token,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            parsed = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        try:
+            parsed = json.loads(detail)
+        except json.JSONDecodeError:
+            raise RuntimeError(f"Cloud {action} failed: HTTP {exc.code}") from exc
+        message = str(parsed.get("error") or parsed.get("message") or detail)
+        detail_text = str(parsed.get("detail") or "").strip()
+        if detail_text and detail_text not in message:
+            message = f"{message}: {detail_text}"
+        raise RuntimeError(message) from exc
+    if not isinstance(parsed, dict) or parsed.get("ok") is not True:
+        message = str((parsed or {}).get("error") or f"{action} failed")
+        detail_text = str((parsed or {}).get("detail") or "").strip()
+        if detail_text and detail_text not in message:
+            message = f"{message}: {detail_text}"
+        raise RuntimeError(message)
+    return parsed
 
 
 def fetch_supabase_rows(
@@ -114,16 +174,29 @@ def fetch_supabase_table_count(
     publishable_key: str,
     *,
     work_date: str = "",
+    date_from: str = "",
+    date_to: str = "",
     shift: str = "",
     machine: str = "",
     production_order: str = "",
+    qr_code: str = "",
     timeout: float = 10.0,
 ) -> int:
     """Return an exact count for the selected production source filters."""
 
-    params = {"select": "event_id", "limit": 1}
+    params: dict[str, object] = {"select": "event_id", "limit": 1}
+    if work_date:
+        params["metadata->>work_date"] = f"eq.{work_date}"
+    elif date_from and date_to:
+        params["and"] = (
+            f"(metadata->>work_date.gte.{date_from},"
+            f"metadata->>work_date.lte.{date_to})"
+        )
+    elif date_from:
+        params["metadata->>work_date"] = f"gte.{date_from}"
+    elif date_to:
+        params["metadata->>work_date"] = f"lte.{date_to}"
     for field, value in (
-        ("work_date", work_date),
         ("shift", shift),
         ("machine", machine),
         ("production_order", production_order),
@@ -131,6 +204,11 @@ def fetch_supabase_table_count(
         selected = str(value or "").strip()
         if selected:
             params[f"metadata->>{field}"] = f"eq.{selected}"
+    selected_qr = str(qr_code or "").strip()
+    if selected_qr:
+        safe = selected_qr.replace("*", "").replace(",", "").replace(")", "")
+        if safe:
+            params["qr_code"] = f"ilike.*{safe}*"
     query = urllib.parse.urlencode(params)
     request = urllib.request.Request(
         f"{supabase_url.rstrip('/')}/rest/v1/can_tu_dong?{query}",

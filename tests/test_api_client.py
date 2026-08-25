@@ -46,6 +46,44 @@ def test_fetch_supabase_table_count_uses_all_source_filters(monkeypatch) -> None
     assert captured["timeout"] == 10.0
 
 
+def test_fetch_supabase_table_count_supports_date_range_and_qr(monkeypatch) -> None:
+    captured = {}
+
+    class FakeResponse:
+        headers = {"Content-Range": "0-0/12"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(request, timeout):
+        captured["request"] = request
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    total = fetch_supabase_table_count(
+        "https://project.supabase.co",
+        "public-key",
+        date_from="2026-08-01",
+        date_to="2026-08-24",
+        shift="HC1",
+        qr_code="SP-01",
+    )
+
+    query = urllib.parse.parse_qs(
+        urllib.parse.urlsplit(captured["request"].full_url).query
+    )
+    assert total == 12
+    assert query["and"] == [
+        "(metadata->>work_date.gte.2026-08-01,metadata->>work_date.lte.2026-08-24)"
+    ]
+    assert query["metadata->>shift"] == ["eq.HC1"]
+    assert query["qr_code"] == ["ilike.*SP-01*"]
+
+
 def test_fetch_supabase_photo_drafts_counts_distinct_error_products(monkeypatch) -> None:
     captured = {}
 
