@@ -307,11 +307,11 @@ class CodexOAuthClient:
                 "message": f"{type(exc).__name__}: {str(exc).strip()}"[:300],
             }
 
-    def start_device_login(self) -> dict[str, object]:
+    def start_device_login(self, *, force: bool = False) -> dict[str, object]:
         if not self.store.configured:
             raise CodexOAuthError(self.store.config_error or "Kho token Codex chưa cấu hình")
         current = self.status()
-        if current.get("authenticated") and not current.get("expired"):
+        if not force and current.get("authenticated") and not current.get("expired"):
             return {
                 "started": False,
                 "authenticated": True,

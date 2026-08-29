@@ -212,12 +212,12 @@ class CodexWeightReader:
             self._status_cache = (time.monotonic(), dict(result))
         return result
 
-    def start_device_login(self) -> dict[str, object]:
+    def start_device_login(self, *, force: bool = False) -> dict[str, object]:
         executable = self._executable()
         if executable is None:
             raise RuntimeError("Chưa cài Codex CLI trên máy backend")
         current = self.status(refresh=True)
-        if current.get("authenticated"):
+        if not force and current.get("authenticated"):
             return {"started": False, "authenticated": True, "message": "Codex đã đăng nhập"}
         if os.name != "nt":
             return {

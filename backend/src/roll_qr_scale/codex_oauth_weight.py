@@ -112,8 +112,8 @@ class CodexOAuthWeightReader:
             )
         return result
 
-    def start_device_login(self) -> dict[str, object]:
-        return self.oauth.start_device_login()
+    def start_device_login(self, *, force: bool = False) -> dict[str, object]:
+        return self.oauth.start_device_login(force=force)
 
     def poll_device_login(self, session_id: str) -> dict[str, object]:
         return self.oauth.poll_device_login(session_id)

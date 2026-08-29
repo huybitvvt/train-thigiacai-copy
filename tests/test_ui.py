@@ -2311,6 +2311,9 @@ def test_ui_does_not_offer_fake_gemini_profile_when_backend_is_local() -> None:
     assert "recognitionProvider.disabled=!geminiPrimary" in TEST_UI_HTML
     assert "recognition_provider:recognitionProvider.value" in TEST_UI_HTML
     assert "'/api/codex/login'" in TEST_UI_HTML
+    assert "body:JSON.stringify({force})" in TEST_UI_HTML
+    assert "codex.available?'Đăng nhập lại Codex':'Đăng nhập Codex'" in TEST_UI_HTML
+    assert ".codex-login{align-self:flex-start;width:auto!important" in TEST_UI_HTML
     assert "'/api/gemini/key'" in TEST_UI_HTML
     assert 'id="geminiKeyBtn"' in TEST_UI_HTML
     assert 'id="settingsBtn"' in TEST_UI_HTML

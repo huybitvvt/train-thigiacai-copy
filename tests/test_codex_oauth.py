@@ -109,6 +109,29 @@ def test_device_start_accepts_cli_usercode_alias(monkeypatch) -> None:
     assert started["interval"] == 5.0
 
 
+def test_device_start_can_force_login_when_already_authenticated(monkeypatch) -> None:
+    store = MemoryStore(
+        {
+            "access_token": _jwt({"exp": int(time.time()) + 3600}),
+            "refresh_token": "refresh-existing",
+        }
+    )
+    client = CodexOAuthClient(store)
+
+    def fake_http(url, **kwargs):
+        assert url == codex_oauth.DEVICE_CODE_URL
+        return {"device_auth_id": "device-new", "user_code": "NEW-LOGIN", "interval": 5}
+
+    monkeypatch.setattr(codex_oauth, "_http_json", fake_http)
+    current = client.start_device_login()
+    forced = client.start_device_login(force=True)
+
+    assert current["authenticated"] is True
+    assert current["started"] is False
+    assert forced["started"] is True
+    assert forced["user_code"] == "NEW-LOGIN"
+
+
 def test_oauth_weight_reader_parses_fixed_two_decimal_result(monkeypatch) -> None:
     reader = CodexOAuthWeightReader(CodexOAuthClient(MemoryStore()), model="test-model")
     monkeypatch.setattr(

@@ -4389,7 +4389,12 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                 if self.path == "/api/codex/login":
                     if service.codex_reader is None:
                         raise ValueError("Codex chưa được bật trên máy backend")
-                    self.send_json(200, service.codex_reader.start_device_login())
+                    self.send_json(
+                        200,
+                        service.codex_reader.start_device_login(
+                            force=bool(payload.get("force"))
+                        ),
+                    )
                     return
                 if self.path == "/api/codex/login/poll":
                     if service.codex_reader is None:
