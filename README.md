@@ -357,7 +357,11 @@ không phải OpenAI API ổn định dành cho production; OpenAI có thể tha
 hoặc giới hạn tài khoản. Khi Codex lỗi, chọn lại Gemini API để tiếp tục vận hành.
 
 Nút `Đổi key Gemini` cho phép quản trị thay key mà không sửa biến môi trường và
-không redeploy. Backend kiểm tra key mới trực tiếp với Google; chỉ khi hợp lệ mới
+không redeploy. Ô `API Gemini dự phòng` lưu riêng một key mã hóa mà không thay
+key đang chạy.
+Khi cần có thể chuyển qua lại giữa key chính và key dự phòng; lựa chọn đang dùng
+được giữ trong kho bí mật Supabase qua các lần deploy. Backend kiểm tra key mới
+trực tiếp với Google; chỉ khi hợp lệ mới
 mã hóa Fernet và lưu qua Edge Function vào `roll_scale_secrets`, sau đó thay cả
 reader Nhanh và Chính xác trong tiến trình đang chạy. Key hiện tại không bao giờ
 được trả về browser. Nếu Supabase/Google lỗi, key cũ tiếp tục được dùng.

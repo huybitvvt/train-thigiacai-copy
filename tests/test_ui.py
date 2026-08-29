@@ -2315,7 +2315,13 @@ def test_ui_does_not_offer_fake_gemini_profile_when_backend_is_local() -> None:
     assert "codex.available?'Đăng nhập lại Codex':'Đăng nhập Codex'" in TEST_UI_HTML
     assert ".codex-login{align-self:flex-start;width:auto!important" in TEST_UI_HTML
     assert "'/api/gemini/key'" in TEST_UI_HTML
+    assert "'/api/gemini/backup-key'" in TEST_UI_HTML
+    assert "'/api/gemini/key-slot'" in TEST_UI_HTML
     assert 'id="geminiKeyBtn"' in TEST_UI_HTML
+    assert 'id="geminiBackupKeyBtn"' in TEST_UI_HTML
+    assert 'id="geminiBackupApiKeyInput" type="password"' in TEST_UI_HTML
+    assert 'id="useGeminiBackupBtn"' in TEST_UI_HTML
+    assert 'id="useGeminiPrimaryBtn"' in TEST_UI_HTML
     assert 'id="settingsBtn"' in TEST_UI_HTML
     assert 'id="settingsPanel"' in TEST_UI_HTML
     assert 'id="geminiApiKeyInput" type="password"' in TEST_UI_HTML
@@ -2328,6 +2334,7 @@ def test_ui_does_not_offer_fake_gemini_profile_when_backend_is_local() -> None:
 def test_gemini_key_store_uses_supabase_legacy_compatible_action() -> None:
     source = Path(test_ui_module.__file__).read_text(encoding="utf-8")
     assert 'secret_name=f"gemini-api-key:{args.gateway_id}"' in source
+    assert 'secret_name=f"gemini-api-key-backup:{args.gateway_id}"' in source
     assert 'secret_action="codex-auth"' in source
 
 

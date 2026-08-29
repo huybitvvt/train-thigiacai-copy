@@ -1538,10 +1538,11 @@ class StationUIService:
             raise RuntimeError("Gemini primary chưa được cấu hình")
         return self.gemini_reader
 
-    def replace_gemini_key(self, api_key: str) -> dict[str, object]:
-        if self.gemini_key_manager is None:
-            raise ValueError("Chức năng đổi Gemini key chưa được cấu hình")
-        fast, flash37, accurate = self.gemini_key_manager.replace(api_key)
+    def _install_gemini_readers(
+        self,
+        readers: tuple[GeminiWeightReader, GeminiWeightReader, GeminiWeightReader],
+    ) -> None:
+        fast, flash37, accurate = readers
         with self._lock:
             old_fast = self.gemini_reader
             old_flash37 = self.gemini_flash37_reader
@@ -1554,12 +1555,44 @@ class StationUIService:
             if reader is not None and id(reader) not in retired_ids:
                 self._retired_gemini_readers.append(reader)
                 retired_ids.add(id(reader))
+
+    def replace_gemini_key(self, api_key: str) -> dict[str, object]:
+        if self.gemini_key_manager is None:
+            raise ValueError("Chức năng đổi Gemini key chưa được cấu hình")
+        self._install_gemini_readers(self.gemini_key_manager.replace(api_key))
         return {
             "ok": True,
             "changed": True,
             "stored_encrypted": True,
             "key_id": self.gemini_key_manager.key_id(api_key),
             "message": "Đã kiểm tra, mã hóa và áp dụng Gemini API key mới",
+        }
+
+    def save_gemini_backup_key(self, api_key: str) -> dict[str, object]:
+        if self.gemini_key_manager is None:
+            raise ValueError("Chức năng Gemini key dự phòng chưa được cấu hình")
+        key_id = self.gemini_key_manager.save_backup(api_key)
+        return {
+            "ok": True,
+            "saved": True,
+            "activated": False,
+            "stored_encrypted": True,
+            "key_id": key_id,
+            "message": "Đã kiểm tra và lưu Gemini key dự phòng; key đang dùng không đổi",
+        }
+
+    def switch_gemini_key(self, slot: str) -> dict[str, object]:
+        if self.gemini_key_manager is None:
+            raise ValueError("Chức năng chuyển Gemini key chưa được cấu hình")
+        self._install_gemini_readers(self.gemini_key_manager.activate(slot))
+        key_status = self.gemini_key_manager.status()
+        label = "dự phòng" if slot == "backup" else "chính"
+        return {
+            "ok": True,
+            "changed": True,
+            "active_slot": slot,
+            "key_id": key_status.get("key_id"),
+            "message": f"Đã chuyển sang Gemini key {label}",
         }
 
     @staticmethod
@@ -3315,6 +3348,9 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
     gemini_accurate_reader = None
     gemini_key_manager = None
     if weight_engine in {"hybrid", "gemini"}:
+        gemini_encryption_key = os.environ.get(
+            "ROLL_SCALE_GEMINI_KEY_ENCRYPTION_KEY", ""
+        ) or os.environ.get("ROLL_SCALE_CODEX_TOKEN_KEY", "")
         gemini_key_store = EncryptedCodexTokenStore(
             args.api_url,
             args.api_token,
@@ -3323,11 +3359,18 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
             # can store any encrypted secret by its distinct name. New Functions
             # accept this action too.
             secret_action="codex-auth",
-            encryption_key=os.environ.get("ROLL_SCALE_GEMINI_KEY_ENCRYPTION_KEY", "")
-            or os.environ.get("ROLL_SCALE_CODEX_TOKEN_KEY", ""),
+            encryption_key=gemini_encryption_key,
+        )
+        gemini_backup_key_store = EncryptedCodexTokenStore(
+            args.api_url,
+            args.api_token,
+            secret_name=f"gemini-api-key-backup:{args.gateway_id}",
+            secret_action="codex-auth",
+            encryption_key=gemini_encryption_key,
         )
         gemini_key_manager = GeminiKeyManager(
             gemini_key_store,
+            backup_store=gemini_backup_key_store,
             fast_model=args.gemini_model,
             flash37_model=args.gemini_37_model,
             accurate_model=args.gemini_accurate_model,
@@ -4406,6 +4449,18 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     return
                 if self.path == "/api/gemini/key":
                     self.send_json(200, service.replace_gemini_key(str(payload.get("api_key", ""))))
+                    return
+                if self.path == "/api/gemini/backup-key":
+                    self.send_json(
+                        200,
+                        service.save_gemini_backup_key(str(payload.get("api_key", ""))),
+                    )
+                    return
+                if self.path == "/api/gemini/key-slot":
+                    self.send_json(
+                        200,
+                        service.switch_gemini_key(str(payload.get("slot", ""))),
+                    )
                     return
                 if self.path == "/api/panel/regions":
                     self.send_json(

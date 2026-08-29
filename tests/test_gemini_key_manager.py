@@ -35,9 +35,15 @@ class FakeReader:
         self.closed = True
 
 
-def manager(store, initial="environment-key-value"):
+def manager(
+    store,
+    initial="environment-key-value",
+    *,
+    backup_store=None,
+):
     return GeminiKeyManager(
         store,
+        backup_store=backup_store,
         fast_model="fast-model",
         flash37_model="flash37-model",
         accurate_model="accurate-model",
@@ -68,7 +74,11 @@ def test_replace_validates_before_persisting_and_creates_all_readers(monkeypatch
     current = manager(store)
     monkeypatch.setattr(current, "validate", lambda key: None)
     fast, flash37, accurate = current.replace("new-key-value-123456789")
-    assert store.value == {"api_key": "new-key-value-123456789", "provider": "gemini"}
+    assert store.value == {
+        "api_key": "new-key-value-123456789",
+        "provider": "gemini",
+        "active_slot": "primary",
+    }
     assert fast.kwargs["model"] == "fast-model"
     assert flash37.kwargs["model"] == "flash37-model"
     assert flash37.kwargs["thinking_level"] == "low"
@@ -92,6 +102,76 @@ def test_replace_keeps_new_readers_out_when_store_fails(monkeypatch) -> None:
         current.replace("new-key-value-123456789")
     assert len(created) == 3
     assert all(item.closed for item in created)
+
+
+def test_save_backup_validates_and_persists_without_activating(monkeypatch) -> None:
+    primary_store = MemoryStore(
+        {"api_key": "primary-key-value-123456", "active_slot": "primary"}
+    )
+    backup_store = MemoryStore()
+    current = manager(
+        primary_store,
+        backup_store=backup_store,
+    )
+    current.load_key()
+    monkeypatch.setattr(current, "validate", lambda key: None)
+
+    backup_id = current.save_backup("backup-key-value-1234567")
+
+    assert backup_store.value == {
+        "api_key": "backup-key-value-1234567",
+        "provider": "gemini-backup",
+    }
+    assert primary_store.value == {
+        "api_key": "primary-key-value-123456",
+        "active_slot": "primary",
+    }
+    assert current.status()["active_slot"] == "primary"
+    assert current.status()["backup_configured"] is True
+    assert current.status()["backup_key_id"] == backup_id
+
+
+def test_activate_backup_keeps_primary_and_persists_selection(monkeypatch) -> None:
+    primary_store = MemoryStore(
+        {"api_key": "primary-key-value-123456", "active_slot": "primary"}
+    )
+    backup_store = MemoryStore({"api_key": "backup-key-value-1234567"})
+    current = manager(
+        primary_store,
+        backup_store=backup_store,
+    )
+    current.load_key()
+    monkeypatch.setattr(current, "validate", lambda key: None)
+
+    readers = current.activate("backup")
+
+    assert all(reader.api_key == "backup-key-value-1234567" for reader in readers)
+    assert primary_store.value == {
+        "api_key": "primary-key-value-123456",
+        "provider": "gemini",
+        "active_slot": "backup",
+    }
+    assert current.status()["active_slot"] == "backup"
+    assert current.status()["key_id"] == current.key_id("backup-key-value-1234567")
+
+    primary_readers = current.activate("primary")
+
+    assert all(reader.api_key == "primary-key-value-123456" for reader in primary_readers)
+    assert primary_store.value["active_slot"] == "primary"
+    assert current.status()["active_slot"] == "primary"
+
+
+def test_load_restores_selected_backup_after_restart() -> None:
+    current = manager(
+        MemoryStore(
+            {"api_key": "primary-key-value-123456", "active_slot": "backup"}
+        ),
+        backup_store=MemoryStore({"api_key": "backup-key-value-1234567"}),
+    )
+
+    assert current.load_key() == "backup-key-value-1234567"
+    assert current.status()["active_slot"] == "backup"
+    assert current.status()["source"] == "supabase-encrypted-backup"
 
 
 def test_gemini_store_uses_legacy_compatible_encrypted_secret_action() -> None:

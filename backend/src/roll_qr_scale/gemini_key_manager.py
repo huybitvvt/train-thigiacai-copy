@@ -15,6 +15,7 @@ class GeminiKeyManager:
         self,
         store: EncryptedCodexTokenStore,
         *,
+        backup_store: EncryptedCodexTokenStore | None = None,
         fast_model: str,
         flash37_model: str,
         accurate_model: str,
@@ -25,6 +26,7 @@ class GeminiKeyManager:
         reader_factory: Callable[..., GeminiWeightReader] = GeminiWeightReader,
     ) -> None:
         self.store = store
+        self.backup_store = backup_store
         self.fast_model = fast_model
         self.flash37_model = flash37_model
         self.accurate_model = accurate_model
@@ -36,6 +38,10 @@ class GeminiKeyManager:
         self._lock = threading.RLock()
         self._source = "environment" if self.initial_key else "none"
         self._key_id = self.key_id(self.initial_key) if self.initial_key else ""
+        self._primary_key_id = self._key_id
+        self._backup_key_id = ""
+        self._backup_configured = False
+        self._active_slot = "primary"
         self._last_error = ""
 
     @staticmethod
@@ -44,21 +50,49 @@ class GeminiKeyManager:
         value = api_key.strip()
         return hashlib.sha256(value.encode("utf-8")).hexdigest()[:10] if value else ""
 
-    def load_key(self) -> str:
+    def _saved_key(self, store: EncryptedCodexTokenStore | None) -> str:
+        if store is None or not store.configured:
+            return ""
+        saved = store.read()
+        return str(saved.get("api_key") or "").strip() if saved else ""
+
+    def _primary_key(self) -> tuple[str, str, str]:
         if self.store.configured:
-            try:
-                saved = self.store.read()
-                if saved and str(saved.get("api_key") or "").strip():
-                    value = str(saved["api_key"]).strip()
-                    self._source = "supabase-encrypted"
-                    self._key_id = self.key_id(value)
-                    self._last_error = ""
-                    return value
-            except Exception as exc:
-                self._last_error = f"{type(exc).__name__}: {str(exc).strip()}"[:300]
-        self._source = "environment" if self.initial_key else "none"
-        self._key_id = self.key_id(self.initial_key)
-        return self.initial_key
+            saved = self.store.read()
+            if saved and str(saved.get("api_key") or "").strip():
+                slot = "backup" if saved.get("active_slot") == "backup" else "primary"
+                return str(saved["api_key"]).strip(), "supabase-encrypted", slot
+        return self.initial_key, "environment" if self.initial_key else "none", "primary"
+
+    def _backup_key(self) -> str:
+        return self._saved_key(self.backup_store)
+
+    def load_key(self) -> str:
+        errors: list[str] = []
+        try:
+            primary, primary_source, selected_slot = self._primary_key()
+        except Exception as exc:
+            errors.append(f"{type(exc).__name__}: {str(exc).strip()}")
+            primary = self.initial_key
+            primary_source = "environment" if primary else "none"
+            selected_slot = "primary"
+        try:
+            backup = self._backup_key()
+        except Exception as exc:
+            errors.append(f"{type(exc).__name__}: {str(exc).strip()}")
+            backup = ""
+        active_slot = "backup" if selected_slot == "backup" and backup else "primary"
+        value = backup if active_slot == "backup" else primary
+        source = "supabase-encrypted-backup" if active_slot == "backup" else primary_source
+        with self._lock:
+            self._source = source
+            self._key_id = self.key_id(value)
+            self._primary_key_id = self.key_id(primary)
+            self._backup_key_id = self.key_id(backup)
+            self._backup_configured = bool(backup)
+            self._active_slot = active_slot
+            self._last_error = "; ".join(errors)[:300]
+        return value
 
     def create_readers(
         self,
@@ -142,7 +176,9 @@ class GeminiKeyManager:
         self.validate(value)
         readers = self.create_readers(value)
         try:
-            self.store.write({"api_key": value, "provider": "gemini"})
+            self.store.write(
+                {"api_key": value, "provider": "gemini", "active_slot": "primary"}
+            )
         except Exception:
             for reader in readers:
                 reader.close()
@@ -150,6 +186,65 @@ class GeminiKeyManager:
         with self._lock:
             self._source = "supabase-encrypted"
             self._key_id = self.key_id(value)
+            self._primary_key_id = self._key_id
+            self._active_slot = "primary"
+            self._last_error = ""
+        return readers
+
+    def save_backup(self, api_key: str) -> str:
+        if self.backup_store is None or not self.backup_store.configured:
+            raise ValueError("Kho Gemini key dự phòng chưa được cấu hình")
+        with self._lock:
+            if self._active_slot == "backup":
+                raise ValueError("Hãy chuyển về key chính trước khi thay key dự phòng")
+        value = self._validate_format(api_key)
+        self.validate(value)
+        primary, _, _ = self._primary_key()
+        if value == primary:
+            raise ValueError("Gemini key dự phòng phải khác key chính")
+        self.backup_store.write({"api_key": value, "provider": "gemini-backup"})
+        key_id = self.key_id(value)
+        with self._lock:
+            self._backup_configured = True
+            self._backup_key_id = key_id
+            self._last_error = ""
+        return key_id
+
+    def activate(
+        self,
+        slot: str,
+    ) -> tuple[GeminiWeightReader, GeminiWeightReader, GeminiWeightReader]:
+        if slot not in {"primary", "backup"}:
+            raise ValueError("Khe Gemini key phải là primary hoặc backup")
+        primary, primary_source, _ = self._primary_key()
+        if slot == "backup":
+            value = self._backup_key()
+            source = "supabase-encrypted-backup"
+            if not value:
+                raise ValueError("Chưa lưu Gemini key dự phòng")
+        else:
+            value, source = primary, primary_source
+            if not value:
+                raise ValueError("Chưa cấu hình Gemini key chính")
+        self.validate(value)
+        readers = self.create_readers(value)
+        try:
+            self.store.write(
+                {"api_key": primary, "provider": "gemini", "active_slot": slot}
+            )
+        except Exception:
+            for reader in readers:
+                reader.close()
+            raise
+        with self._lock:
+            self._source = source
+            self._key_id = self.key_id(value)
+            if slot == "primary":
+                self._primary_key_id = self._key_id
+            else:
+                self._backup_configured = True
+                self._backup_key_id = self._key_id
+            self._active_slot = slot
             self._last_error = ""
         return readers
 
@@ -157,9 +252,21 @@ class GeminiKeyManager:
         with self._lock:
             return {
                 "change_enabled": self.store.configured,
+                "backup_change_enabled": bool(
+                    self.backup_store is not None and self.backup_store.configured
+                ),
+                "switch_enabled": bool(
+                    self.store.configured
+                    and self.backup_store is not None
+                    and self.backup_store.configured
+                ),
                 "source": self._source,
                 "key_id": self._key_id or None,
-                "stored_encrypted": self._source == "supabase-encrypted",
+                "primary_key_id": self._primary_key_id or None,
+                "backup_key_id": self._backup_key_id or None,
+                "backup_configured": self._backup_configured,
+                "active_slot": self._active_slot,
+                "stored_encrypted": self._source.startswith("supabase-encrypted"),
                 "last_error": self._last_error or None,
                 "message": self.store.config_error if not self.store.configured else "Sẵn sàng đổi Gemini API key",
             }
