@@ -1588,6 +1588,12 @@ def test_shift_count_is_visible_and_refreshes_after_save_and_filter_changes() ->
     assert "function maybePromptRollBatchConfirm" in TEST_UI_HTML
     assert "function confirmRollBatchCount" in TEST_UI_HTML
     assert "rollBatchConfirmActive()" in TEST_UI_HTML
+    assert "function qrDuplicateMessage" in TEST_UI_HTML
+    assert "function rejectDuplicateQr" in TEST_UI_HTML
+    assert "function verifyQrAgainstServer" in TEST_UI_HTML
+    assert "TRÙNG MÃ QR" in TEST_UI_HTML
+    assert "rebuildProductionQrIndex" in TEST_UI_HTML
+    assert "!roundHasDuplicateQr(session,index)" in TEST_UI_HTML
 
 
 def test_production_orders_read_master_table_rows() -> None:
