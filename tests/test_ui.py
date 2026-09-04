@@ -2313,6 +2313,8 @@ def test_parser_auto_selects_gemini_only_when_key_exists_and_engine_is_omitted(
 def test_ui_does_not_offer_fake_gemini_profile_when_backend_is_local() -> None:
     assert 'id="recognitionProfileOption"' in TEST_UI_HTML
     assert 'id="recognitionProvider"' in TEST_UI_HTML
+    assert 'id="recognitionHint"' in TEST_UI_HTML
+    assert "function syncRecognitionSettings" in TEST_UI_HTML
     assert '<option value="gemini">Gemini API</option>' in TEST_UI_HTML
     assert '<option value="codex">Codex · ChatGPT</option>' in TEST_UI_HTML
     assert "$('recognitionProviderOption').hidden=!primary" in TEST_UI_HTML
