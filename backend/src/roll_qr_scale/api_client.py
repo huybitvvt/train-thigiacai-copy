@@ -232,35 +232,50 @@ def fetch_supabase_table_count(
     return int(total)
 
 
-def fetch_supabase_photo_draft_parent_ids(
+def fetch_supabase_photo_drafts(
     supabase_url: str,
     service_key: str,
     *,
     work_date: str = "",
+    date_from: str = "",
+    date_to: str = "",
     shift: str = "",
     machine: str = "",
     production_order: str = "",
+    qr_code: str = "",
     timeout: float = 10.0,
-) -> set[str]:
-    """Return distinct production events whose unreadable photos were saved."""
+) -> list[dict[str, object]]:
+    """Return saved unreadable photos for production-list display."""
 
-    parent_ids: set[str] = set()
+    saved_rows: list[dict[str, object]] = []
     page_size = 1000
     for page in range(50):
         params: dict[str, object] = {
-            "select": "parent_event_id,event_id",
+            "select": (
+                "parent_event_id,event_id,capture_kind,capture_round,qr_code,"
+                "captured_at,image_url,work_date,shift,machine,production_order,status"
+            ),
+            "order": "captured_at.desc",
             "limit": page_size,
             "offset": page * page_size,
         }
-        for field, value in (
-            ("work_date", work_date),
-            ("shift", shift),
-            ("machine", machine),
-            ("production_order", production_order),
-        ):
+        if work_date:
+            params["work_date"] = f"eq.{work_date}"
+        elif date_from and date_to:
+            params["and"] = f"(work_date.gte.{date_from},work_date.lte.{date_to})"
+        elif date_from:
+            params["work_date"] = f"gte.{date_from}"
+        elif date_to:
+            params["work_date"] = f"lte.{date_to}"
+        for field, value in (("shift", shift), ("machine", machine), ("production_order", production_order)):
             selected = str(value or "").strip()
             if selected:
                 params[field] = f"eq.{selected}"
+        selected_qr = str(qr_code or "").strip()
+        if selected_qr:
+            safe = selected_qr.replace("*", "").replace(",", "").replace(")", "")
+            if safe:
+                params["qr_code"] = f"ilike.*{safe}*"
         query = urllib.parse.urlencode(params)
         request = urllib.request.Request(
             f"{supabase_url.rstrip('/')}/rest/v1/anh_can_cho_ai?{query}",
@@ -276,13 +291,28 @@ def fetch_supabase_photo_draft_parent_ids(
         if not isinstance(parsed, list):
             raise RuntimeError("Supabase anh_can_cho_ai response is invalid")
         rows = [item for item in parsed if isinstance(item, dict)]
-        for item in rows:
-            parent_id = str(item.get("parent_event_id") or item.get("event_id") or "").strip()
-            if parent_id:
-                parent_ids.add(parent_id)
+        saved_rows.extend(rows)
         if len(rows) < page_size:
-            return parent_ids
+            return saved_rows
     raise RuntimeError("Supabase saved-error count exceeds the safe page limit")
+
+
+def fetch_supabase_photo_draft_parent_ids(
+    supabase_url: str,
+    service_key: str,
+    **filters: object,
+) -> set[str]:
+    """Return distinct production events whose unreadable photos were saved."""
+
+    return {
+        parent_id
+        for item in fetch_supabase_photo_drafts(supabase_url, service_key, **filters)
+        if (
+            parent_id := str(
+                item.get("parent_event_id") or item.get("event_id") or ""
+            ).strip()
+        )
+    }
 
 
 def persist_product_evidence(

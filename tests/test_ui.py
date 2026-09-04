@@ -53,6 +53,7 @@ def test_photo_only_and_factory_buttons_are_removed_from_operator_view() -> None
     assert "Nhấn Enter để lưu ảnh với số trống" in TEST_UI_HTML
     assert "ID ảnh sẽ được tự tạo an toàn" in TEST_UI_HTML
     assert "error_saved:true" in TEST_UI_HTML
+    assert "row.classList.add('photo-draft-row')" in TEST_UI_HTML
 
 
 def test_ui_capture_decodes_qr_and_saves_stable_manual_weight(tmp_path) -> None:
@@ -1572,12 +1573,66 @@ def test_local_measurement_count_uses_all_source_filters_without_display_limit()
     assert test_ui_module._local_production_counts(FakeStore(), **filters) == (209, 1)
 
 
+def test_local_production_items_show_unread_photos_as_one_visible_row(tmp_path) -> None:
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    parent_id = "31c3db88-2c7d-4a35-b5f0-3a83e9a6745a"
+    core_id = "a5a53a31-3b46-484e-b111-59735657bed7"
+    product_id = "d037931d-089d-44ce-96c5-53d41a95c933"
+    common = {
+        "parent_event_id": parent_id,
+        "capture_round": 0,
+        "needs_sync": True,
+        "work_date": "2026-09-04",
+        "shift": "12C2",
+        "machine": "Máy Bao Bì",
+        "production_order": "LSX-DH067",
+    }
+    store.save_photo_draft_idempotent(
+        np.zeros((80, 120, 3), dtype=np.uint8),
+        event_id=core_id,
+        capture_kind="core",
+        captured_at="2026-09-04T12:00:00+00:00",
+        **common,
+    )
+    store.save_photo_draft_idempotent(
+        np.full((80, 120, 3), 20, dtype=np.uint8),
+        event_id=product_id,
+        capture_kind="product",
+        qr_code="SP-001",
+        captured_at="2026-09-04T12:00:01+00:00",
+        **common,
+    )
+
+    items = test_ui_module._local_production_items(
+        store,
+        100,
+        work_date="2026-09-04",
+        shift="12C2",
+        machine="Máy Bao Bì",
+        production_order="LSX-DH067",
+    )
+    store.close()
+
+    assert len(items) == 1
+    assert items[0]["event_id"] == parent_id
+    assert items[0]["qr_code"] == "SP-001"
+    assert items[0]["core_weight"] == "unread"
+    assert items[0]["product_weight"] == "unread"
+    assert items[0]["sync_status"] == "pending"
+    assert items[0]["has_core_image"] is True
+    assert items[0]["has_product_image"] is True
+    assert core_id in str(items[0]["core_image_url"])
+    assert product_id in str(items[0]["product_image_url"])
+    assert "AI chưa đọc được số cân" in str(items[0]["sync_error"])
+
+
 def test_shift_count_is_visible_and_refreshes_after_save_and_filter_changes() -> None:
     assert 'id="shiftCount"' in TEST_UI_HTML
     assert 'id="shiftCountValue"' in TEST_UI_HTML
     assert "Số lượng trong ca" in TEST_UI_HTML
     assert "data.total_count" in TEST_UI_HTML
     assert "data.error_count" in TEST_UI_HTML
+    assert "ảnh đã hiện ở danh sách bên dưới" in TEST_UI_HTML
     assert 'id="shiftCountDetail"' in TEST_UI_HTML
     assert "Theo Ngày · Ca · Máy · Lệnh sản xuất" in TEST_UI_HTML
     assert "session.captureCount+=savedNow;await loadRecords()" in TEST_UI_HTML

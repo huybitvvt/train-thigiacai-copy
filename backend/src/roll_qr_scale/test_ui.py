@@ -40,7 +40,7 @@ from .capture_gate import frame_fingerprint
 from .api_client import (
     fetch_remote_json,
     fetch_remote_measurements,
-    fetch_supabase_photo_draft_parent_ids,
+    fetch_supabase_photo_drafts,
     fetch_supabase_rows,
     fetch_supabase_table,
     fetch_supabase_table_count,
@@ -1048,6 +1048,139 @@ def _local_measurement_items(
         if len(items) >= limit:
             break
     return items
+
+
+def _photo_draft_display_items(
+    rows: list[dict[str, object]],
+    *,
+    work_date: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    shift: str = "",
+    machine: str = "",
+    production_order: str = "",
+    qr_code: str = "",
+) -> list[dict[str, object]]:
+    """Group saved unreadable core/product photos into visible production rows."""
+
+    grouped: dict[str, dict[str, object]] = {}
+    image_times: dict[tuple[str, str], str] = {}
+    sync_states: dict[str, set[str]] = {}
+    sync_errors: dict[str, set[str]] = {}
+    for item in rows:
+        parent_id = str(
+            item.get("parent_event_id") or item.get("event_id") or ""
+        ).strip()
+        if not parent_id:
+            continue
+        captured_at = str(item.get("captured_at") or "")
+        payload = grouped.setdefault(
+            parent_id,
+            {
+                "event_id": parent_id,
+                "qr_code": "",
+                "core_weight": "unread",
+                "product_weight": "unread",
+                "weight_raw": "",
+                "unit": "kg",
+                "captured_at": captured_at,
+                "work_date": str(item.get("work_date") or ""),
+                "shift": str(item.get("shift") or ""),
+                "machine": str(item.get("machine") or ""),
+                "production_order": str(item.get("production_order") or ""),
+                "core_image_url": None,
+                "product_image_url": None,
+                "has_core_image": False,
+                "has_product_image": False,
+                "error_only": True,
+                "record_note": "Ảnh đã lưu · AI chưa đọc được số cân",
+            },
+        )
+        if captured_at > str(payload.get("captured_at") or ""):
+            payload["captured_at"] = captured_at
+        detected_qr = str(item.get("qr_code") or "").strip()
+        if detected_qr and not payload["qr_code"]:
+            payload["qr_code"] = detected_qr
+        for field in ("work_date", "shift", "machine", "production_order"):
+            value = str(item.get(field) or "").strip()
+            if value and not payload[field]:
+                payload[field] = value
+
+        capture_id = str(item.get("event_id") or "").strip()
+        image_path = str(item.get("image_path") or "").strip()
+        remote_url = str(
+            item.get("image_url") or item.get("remote_image_url") or ""
+        ).strip()
+        if image_path and Path(image_path).is_file() and capture_id:
+            image_url = (
+                "/api/photo-draft-image?event_id="
+                + urllib.parse.quote(capture_id)
+            )
+        else:
+            image_url = remote_url
+        kind = str(item.get("capture_kind") or "core").strip().lower()
+        if kind not in {"core", "product"}:
+            kind = "core"
+        image_key = (parent_id, kind)
+        if image_url and captured_at >= image_times.get(image_key, ""):
+            payload[f"{kind}_image_url"] = image_url
+            payload[f"has_{kind}_image"] = True
+            image_times[image_key] = captured_at
+
+        state = str(item.get("sync_status") or "synced").strip().lower()
+        sync_states.setdefault(parent_id, set()).add(state)
+        error = str(item.get("sync_error") or "").strip()
+        if error:
+            sync_errors.setdefault(parent_id, set()).add(error)
+
+    items: list[dict[str, object]] = []
+    for parent_id, payload in grouped.items():
+        states = sync_states.get(parent_id, {"synced"})
+        storage_sync_status = (
+            "failed"
+            if "failed" in states
+            else "pending"
+            if states & {"pending", "local"}
+            else "synced"
+        )
+        payload["storage_sync_status"] = storage_sync_status
+        payload["sync_status"] = "failed" if storage_sync_status == "failed" else "pending"
+        details = ["AI chưa đọc được số cân"]
+        details.extend(sorted(sync_errors.get(parent_id, set())))
+        payload["sync_error"] = " · ".join(details)
+        if _matches_source_filters(
+            payload,
+            work_date=work_date,
+            date_from=date_from,
+            date_to=date_to,
+            shift=shift,
+            machine=machine,
+            production_order=production_order,
+            qr_code=qr_code,
+        ):
+            items.append(payload)
+    return items
+
+
+def _local_production_items(
+    store: MeasurementStore,
+    limit: int,
+    **filters: object,
+) -> list[dict[str, object]]:
+    measurements = _local_measurement_items(store, max(limit, 200), **filters)
+    measurement_ids = {
+        str(item.get("event_id") or "").strip() for item in measurements
+    }
+    photo_items = [
+        item
+        for item in _photo_draft_display_items(
+            store.photo_draft_source_rows(), **filters
+        )
+        if str(item.get("event_id") or "").strip() not in measurement_ids
+    ]
+    items = measurements + photo_items
+    items.sort(key=lambda item: str(item.get("captured_at") or ""), reverse=True)
+    return items[:limit]
 
 
 def _local_measurement_event_ids(
@@ -3730,6 +3863,15 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     return
                 self.send_bytes(200, "image/jpeg", image_path.read_bytes())
                 return
+            if parsed.path == "/api/photo-draft-image":
+                event_id = urllib.parse.parse_qs(parsed.query).get("event_id", [""])[0]
+                draft = store.get_photo_draft(event_id)
+                image_path = Path(draft.image_path) if draft is not None else None
+                if image_path is None or not image_path.is_file():
+                    self.send_json(404, {"ok": False, "error": "image_not_found"})
+                    return
+                self.send_bytes(200, "image/jpeg", image_path.read_bytes())
+                return
             if parsed.path == "/api/inventory-image":
                 query = urllib.parse.parse_qs(parsed.query)
                 event_id = query.get("event_id", [""])[0]
@@ -3895,7 +4037,7 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                             "total_count": local_total_count,
                             "error_count": local_error_count,
                             "count_exact": True,
-                            "items": _local_measurement_items(
+                            "items": _local_production_items(
                                 store,
                                 limit,
                                 **list_filters,
@@ -3914,18 +4056,34 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         )
                     except Exception as exc:
                         count_error = str(exc)
+                remote_error_rows: list[dict[str, object]] | None = None
                 remote_error_parent_ids: set[str] | None = None
                 if supabase_url and publishable_key:
                     try:
-                        remote_error_parent_ids = fetch_supabase_photo_draft_parent_ids(
+                        remote_error_rows = fetch_supabase_photo_drafts(
                             supabase_url,
                             publishable_key,
                             work_date=work_date,
+                            date_from=date_from,
+                            date_to=date_to,
                             shift=shift,
                             machine=machine,
                             production_order=production_order,
+                            qr_code=qr_code,
                         )
+                        remote_error_parent_ids = {
+                            parent_id
+                            for item in remote_error_rows
+                            if (
+                                parent_id := str(
+                                    item.get("parent_event_id")
+                                    or item.get("event_id")
+                                    or ""
+                                ).strip()
+                            )
+                        }
                     except Exception as exc:
+                        remote_error_rows = None
                         remote_error_parent_ids = None
                         count_error = "; ".join(
                             value for value in (count_error, str(exc)) if value
@@ -4001,8 +4159,6 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         **list_filters,
                     ):
                         items.append(payload)
-                    if len(items) >= limit:
-                        break
                 filters = list_filters
                 local_measurement_ids = _local_measurement_event_ids(store, **filters)
                 local_unsynced_measurement_ids = _local_measurement_event_ids(
@@ -4020,6 +4176,25 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     else _local_error_parent_ids(store, **filters) - local_measurement_ids
                 )
                 error_count = len(error_parent_ids)
+                local_error_rows = store.photo_draft_source_rows()
+                error_items = _photo_draft_display_items(
+                    (remote_error_rows or []) + local_error_rows,
+                    **filters,
+                )
+                measurement_item_ids = {
+                    str(item.get("event_id") or "").strip() for item in items
+                }
+                items.extend(
+                    item
+                    for item in error_items
+                    if str(item.get("event_id") or "").strip()
+                    not in measurement_item_ids
+                )
+                items.sort(
+                    key=lambda item: str(item.get("captured_at") or ""),
+                    reverse=True,
+                )
+                items = items[:limit]
                 if remote_total_count is not None:
                     measurement_count = remote_total_count + len(
                         local_unsynced_measurement_ids

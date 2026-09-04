@@ -903,12 +903,14 @@ class MeasurementStore:
         return [dict(row) for row in rows]
 
     def photo_draft_source_rows(self) -> list[dict[str, object]]:
-        """Return lightweight saved-error fields for exact production counts."""
+        """Return saved-error fields for counts and production-list display."""
 
         with self._lock:
             rows = self.connection.execute(
-                "SELECT event_id, parent_event_id, captured_at, work_date, shift, "
-                "machine, production_order, sync_status FROM photo_drafts "
+                "SELECT event_id, parent_event_id, capture_kind, capture_round, "
+                "qr_code, captured_at, image_path, remote_image_url, work_date, "
+                "shift, machine, production_order, status, sync_status, sync_error "
+                "FROM photo_drafts "
                 "ORDER BY id DESC"
             ).fetchall()
         return [dict(row) for row in rows]
