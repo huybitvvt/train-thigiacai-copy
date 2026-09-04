@@ -17,9 +17,11 @@ class GeminiKeyManager:
         *,
         backup_store: EncryptedCodexTokenStore | None = None,
         fast_model: str,
+        flash31_model: str,
         flash37_model: str,
         accurate_model: str,
         fast_timeout: float,
+        flash31_timeout: float,
         flash37_timeout: float,
         accurate_timeout: float,
         initial_key: str,
@@ -28,9 +30,11 @@ class GeminiKeyManager:
         self.store = store
         self.backup_store = backup_store
         self.fast_model = fast_model
+        self.flash31_model = flash31_model
         self.flash37_model = flash37_model
         self.accurate_model = accurate_model
         self.fast_timeout = float(fast_timeout)
+        self.flash31_timeout = float(flash31_timeout)
         self.flash37_timeout = float(flash37_timeout)
         self.accurate_timeout = float(accurate_timeout)
         self.initial_key = initial_key.strip()
@@ -97,9 +101,26 @@ class GeminiKeyManager:
     def create_readers(
         self,
         api_key: str,
-    ) -> tuple[GeminiWeightReader, GeminiWeightReader, GeminiWeightReader]:
+    ) -> tuple[
+        GeminiWeightReader,
+        GeminiWeightReader,
+        GeminiWeightReader,
+        GeminiWeightReader,
+    ]:
         readers: list[GeminiWeightReader] = []
         try:
+            readers.append(
+                self.reader_factory(
+                    api_key,
+                    model=self.flash31_model,
+                    timeout_seconds=self.flash31_timeout,
+                    thinking_level="minimal",
+                    max_image_edge=1600,
+                    jpeg_quality=90,
+                    media_resolution="high",
+                    include_qr=False,
+                )
+            )
             readers.append(
                 self.reader_factory(
                     api_key,
@@ -140,8 +161,8 @@ class GeminiKeyManager:
             for reader in readers:
                 reader.close()
             raise
-        fast, flash37, accurate = readers
-        return fast, flash37, accurate
+        flash31, fast, flash37, accurate = readers
+        return fast, flash31, flash37, accurate
 
     @staticmethod
     def _validate_format(api_key: str) -> str:
@@ -162,7 +183,7 @@ class GeminiKeyManager:
             http_options=types.HttpOptions(timeout=10000),
         )
         try:
-            client.models.get(model=self.fast_model)
+            client.models.get(model=self.flash31_model)
         except Exception as exc:
             raise ValueError(f"Gemini từ chối key hoặc model: {str(exc)[:240]}") from exc
         finally:
@@ -171,7 +192,12 @@ class GeminiKeyManager:
     def replace(
         self,
         api_key: str,
-    ) -> tuple[GeminiWeightReader, GeminiWeightReader, GeminiWeightReader]:
+    ) -> tuple[
+        GeminiWeightReader,
+        GeminiWeightReader,
+        GeminiWeightReader,
+        GeminiWeightReader,
+    ]:
         value = self._validate_format(api_key)
         self.validate(value)
         readers = self.create_readers(value)
@@ -213,7 +239,12 @@ class GeminiKeyManager:
     def activate(
         self,
         slot: str,
-    ) -> tuple[GeminiWeightReader, GeminiWeightReader, GeminiWeightReader]:
+    ) -> tuple[
+        GeminiWeightReader,
+        GeminiWeightReader,
+        GeminiWeightReader,
+        GeminiWeightReader,
+    ]:
         if slot not in {"primary", "backup"}:
             raise ValueError("Khe Gemini key phải là primary hoặc backup")
         primary, primary_source, _ = self._primary_key()

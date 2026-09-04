@@ -24,6 +24,8 @@ import numpy as np
 
 from .factory_dataset import FactorySampleStore
 from .gemini_weight import (
+    DEFAULT_GEMINI_31_MODEL,
+    DEFAULT_GEMINI_31_TIMEOUT_SECONDS,
     DEFAULT_GEMINI_37_MODEL,
     DEFAULT_GEMINI_37_TIMEOUT_SECONDS,
     DEFAULT_GEMINI_ACCURATE_MODEL,
@@ -182,7 +184,7 @@ MAX_BURST_FRAMES = 9
 DEFAULT_WEIGHT_BURST_FRAMES = 5
 UNITS = {"kg", "g", "lb"}
 WEIGHT_ENGINES = {"local", "hybrid", "gemini"}
-GEMINI_RECOGNITION_PROFILES = {"fast", "flash37", "accurate"}
+GEMINI_RECOGNITION_PROFILES = {"flash31", "fast", "flash37", "accurate"}
 AI_RECOGNITION_PROVIDERS = {"gemini", "codex"}
 PRODUCTION_ORDER_TABLES = (
     "lenh_san_xuat",
@@ -1569,6 +1571,7 @@ class StationUIService:
         weight_rois: list[str] | tuple[str, ...] | None = None,
         weight_burst_frames: int = DEFAULT_WEIGHT_BURST_FRAMES,
         gemini_reader: GeminiWeightReader | None = None,
+        gemini_flash31_reader: GeminiWeightReader | None = None,
         gemini_flash37_reader: GeminiWeightReader | None = None,
         gemini_accurate_reader: GeminiWeightReader | None = None,
         gemini_key_manager: GeminiKeyManager | None = None,
@@ -1612,6 +1615,7 @@ class StationUIService:
         self.auto_advance = bool(auto_advance)
         self.weight_burst_frames = int(weight_burst_frames)
         self.gemini_reader = gemini_reader
+        self.gemini_flash31_reader = gemini_flash31_reader
         self.gemini_flash37_reader = gemini_flash37_reader
         self.gemini_accurate_reader = gemini_accurate_reader
         self.gemini_key_manager = gemini_key_manager
@@ -1686,6 +1690,7 @@ class StationUIService:
         closed: set[int] = set()
         for reader in (
             self.gemini_reader,
+            self.gemini_flash31_reader,
             self.gemini_flash37_reader,
             self.gemini_accurate_reader,
             *self._retired_gemini_readers,
@@ -1709,7 +1714,13 @@ class StationUIService:
 
     def _gemini_reader_for(self, profile: str) -> GeminiWeightReader:
         if profile not in GEMINI_RECOGNITION_PROFILES:
-            raise ValueError("Chế độ nhận diện phải là fast, flash37 hoặc accurate")
+            raise ValueError(
+                "Chế độ nhận diện phải là flash31, fast, flash37 hoặc accurate"
+            )
+        if profile == "flash31":
+            if self.gemini_flash31_reader is None:
+                raise ValueError("Gemini 3.1 Flash-Lite chưa được cấu hình")
+            return self.gemini_flash31_reader
         if profile == "flash37":
             if self.gemini_flash37_reader is None:
                 raise ValueError("Gemini 3.7 Flash chưa được cấu hình")
@@ -1724,18 +1735,25 @@ class StationUIService:
 
     def _install_gemini_readers(
         self,
-        readers: tuple[GeminiWeightReader, GeminiWeightReader, GeminiWeightReader],
+        readers: tuple[
+            GeminiWeightReader,
+            GeminiWeightReader,
+            GeminiWeightReader,
+            GeminiWeightReader,
+        ],
     ) -> None:
-        fast, flash37, accurate = readers
+        fast, flash31, flash37, accurate = readers
         with self._lock:
             old_fast = self.gemini_reader
+            old_flash31 = self.gemini_flash31_reader
             old_flash37 = self.gemini_flash37_reader
             old_accurate = self.gemini_accurate_reader
             self.gemini_reader = fast
+            self.gemini_flash31_reader = flash31
             self.gemini_flash37_reader = flash37
             self.gemini_accurate_reader = accurate
         retired_ids = {id(reader) for reader in self._retired_gemini_readers}
-        for reader in (old_fast, old_flash37, old_accurate):
+        for reader in (old_fast, old_flash31, old_flash37, old_accurate):
             if reader is not None and id(reader) not in retired_ids:
                 self._retired_gemini_readers.append(reader)
                 retired_ids.add(id(reader))
@@ -2018,7 +2036,11 @@ class StationUIService:
                 },
             },
             "recognition_profiles": {
-                "default": "fast",
+                "default": "flash31",
+                "flash31": {
+                    "enabled": self.gemini_flash31_reader is not None,
+                    "model": self._reader_model(self.gemini_flash31_reader),
+                },
                 "fast": {
                     "enabled": self.gemini_reader is not None,
                     "model": self._reader_model(self.gemini_reader),
@@ -2451,7 +2473,9 @@ class StationUIService:
         if unit not in UNITS:
             raise ValueError("Đơn vị không hợp lệ")
         if recognition_profile not in GEMINI_RECOGNITION_PROFILES:
-            raise ValueError("Chế độ nhận diện phải là fast, flash37 hoặc accurate")
+            raise ValueError(
+                "Chế độ nhận diện phải là flash31, fast, flash37 hoặc accurate"
+            )
         recognition_provider = recognition_provider.strip().lower()
         if recognition_provider not in AI_RECOGNITION_PROVIDERS:
             raise ValueError("Bộ AI nhận diện phải là gemini hoặc codex")
@@ -3367,6 +3391,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("ROLL_SCALE_GEMINI_MODEL", DEFAULT_GEMINI_MODEL),
     )
     parser.add_argument(
+        "--gemini-31-model",
+        default=os.environ.get(
+            "ROLL_SCALE_GEMINI_31_MODEL",
+            DEFAULT_GEMINI_31_MODEL,
+        ),
+    )
+    parser.add_argument(
         "--gemini-37-model",
         default=os.environ.get(
             "ROLL_SCALE_GEMINI_37_MODEL",
@@ -3387,6 +3418,16 @@ def build_parser() -> argparse.ArgumentParser:
             os.environ.get(
                 "ROLL_SCALE_GEMINI_TIMEOUT",
                 str(DEFAULT_GEMINI_TIMEOUT_SECONDS),
+            )
+        ),
+    )
+    parser.add_argument(
+        "--gemini-31-timeout",
+        type=float,
+        default=float(
+            os.environ.get(
+                "ROLL_SCALE_GEMINI_31_TIMEOUT",
+                str(DEFAULT_GEMINI_31_TIMEOUT_SECONDS),
             )
         ),
     )
@@ -3528,6 +3569,7 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
     if args.gemini_fallback and weight_engine == "local":
         weight_engine = "hybrid"
     gemini_reader = None
+    gemini_flash31_reader = None
     gemini_flash37_reader = None
     gemini_accurate_reader = None
     gemini_key_manager = None
@@ -3556,9 +3598,11 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
             gemini_key_store,
             backup_store=gemini_backup_key_store,
             fast_model=args.gemini_model,
+            flash31_model=args.gemini_31_model,
             flash37_model=args.gemini_37_model,
             accurate_model=args.gemini_accurate_model,
             fast_timeout=args.gemini_timeout,
+            flash31_timeout=args.gemini_31_timeout,
             flash37_timeout=args.gemini_37_timeout,
             accurate_timeout=args.gemini_accurate_timeout,
             initial_key=os.environ.get("ROLL_SCALE_GEMINI_API_KEY", ""),
@@ -3571,6 +3615,7 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
             )
         (
             gemini_reader,
+            gemini_flash31_reader,
             gemini_flash37_reader,
             gemini_accurate_reader,
         ) = gemini_key_manager.create_readers(
@@ -3631,6 +3676,7 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
         weight_rois=weight_rois,
         weight_burst_frames=args.weight_burst_frames,
         gemini_reader=gemini_reader,
+        gemini_flash31_reader=gemini_flash31_reader,
         gemini_flash37_reader=gemini_flash37_reader,
         gemini_accurate_reader=gemini_accurate_reader,
         gemini_key_manager=gemini_key_manager,

@@ -45,9 +45,11 @@ def manager(
         store,
         backup_store=backup_store,
         fast_model="fast-model",
+        flash31_model="flash31-model",
         flash37_model="flash37-model",
         accurate_model="accurate-model",
         fast_timeout=10,
+        flash31_timeout=15,
         flash37_timeout=30,
         accurate_timeout=30,
         initial_key=initial,
@@ -73,13 +75,15 @@ def test_replace_validates_before_persisting_and_creates_all_readers(monkeypatch
     store = MemoryStore()
     current = manager(store)
     monkeypatch.setattr(current, "validate", lambda key: None)
-    fast, flash37, accurate = current.replace("new-key-value-123456789")
+    fast, flash31, flash37, accurate = current.replace("new-key-value-123456789")
     assert store.value == {
         "api_key": "new-key-value-123456789",
         "provider": "gemini",
         "active_slot": "primary",
     }
     assert fast.kwargs["model"] == "fast-model"
+    assert flash31.kwargs["model"] == "flash31-model"
+    assert flash31.kwargs["timeout_seconds"] == 15
     assert flash37.kwargs["model"] == "flash37-model"
     assert flash37.kwargs["thinking_level"] == "low"
     assert accurate.kwargs["model"] == "accurate-model"
@@ -100,7 +104,7 @@ def test_replace_keeps_new_readers_out_when_store_fails(monkeypatch) -> None:
     current.reader_factory = create
     with pytest.raises(RuntimeError, match="write failed"):
         current.replace("new-key-value-123456789")
-    assert len(created) == 3
+    assert len(created) == 4
     assert all(item.closed for item in created)
 
 

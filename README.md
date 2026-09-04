@@ -306,9 +306,10 @@ $env:ROLL_SCALE_GEMINI_ACCURATE_TIMEOUT = "30.0"
 .\.venv\Scripts\roll-test-ui.exe
 ```
 
-Giao diện có ba profile Gemini độc lập: `fast` dùng Gemini 3.5 Flash-Lite với
-thinking `minimal`; `flash37` dùng Gemini 3.7 Flash với thinking `low`; và
-`accurate` dùng model Pro với thinking `medium`. Flash-Lite vẫn là mặc định.
+Giao diện có bốn profile Gemini độc lập: `fast` dùng Gemini 3.5 Flash-Lite với
+thinking `minimal`; `flash31` dùng Gemini 3.1 Flash-Lite và là mặc định ổn định;
+`flash37` dùng Gemini 3.7 Flash với thinking `low`; và `accurate` dùng model Pro
+với thinking `medium`.
 Lựa chọn model không thay đổi luồng QR độc lập hoặc quy tắc chỉ gửi Supabase
 sau khi đủ hai ảnh cân và mã sản phẩm.
 

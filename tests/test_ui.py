@@ -1243,6 +1243,7 @@ def test_gemini_profiles_use_their_configured_readers(tmp_path) -> None:
             pass
 
     fast = FakeGeminiReader("gemini-3.5-flash-lite", 7.02)
+    flash31 = FakeGeminiReader("gemini-3.1-flash-lite", 6.94)
     flash37 = FakeGeminiReader("gemini-3.7-flash", 9.03)
     accurate = FakeGeminiReader("gemini-3.1-pro-preview", 13.04)
     store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
@@ -1252,11 +1253,18 @@ def test_gemini_profiles_use_their_configured_readers(tmp_path) -> None:
         None,
         None,
         gemini_reader=fast,
+        gemini_flash31_reader=flash31,
         gemini_flash37_reader=flash37,
         gemini_accurate_reader=accurate,
         weight_engine="gemini",
     )
 
+    flash31_result = service.analyze(
+        make_qr_frame("ROLL-PROFILE-31"),
+        "auto",
+        "kg",
+        recognition_profile="flash31",
+    )
     flash37_result = service.analyze(
         make_qr_frame("ROLL-PROFILE-37"),
         "auto",
@@ -1273,16 +1281,21 @@ def test_gemini_profiles_use_their_configured_readers(tmp_path) -> None:
     status = service.status()
     service.close()
     store.close()
+    assert flash31_result["weight"] == pytest.approx(6.94)
+    assert flash31_result["recognition_profile"] == "flash31"
     assert flash37_result["weight"] == pytest.approx(9.03)
     assert flash37_result["recognition_profile"] == "flash37"
     assert result["weight"] == pytest.approx(13.04)
     assert result["recognition_profile"] == "accurate"
     assert fast.calls == 0
+    assert flash31.calls == 1
     assert flash37.calls == 1
     assert accurate.calls == 1
     assert status["recognition_profiles"]["fast"]["model"] == "gemini-3.5-flash-lite"
+    assert status["recognition_profiles"]["flash31"]["model"] == "gemini-3.1-flash-lite"
     assert status["recognition_profiles"]["flash37"]["model"] == "gemini-3.7-flash"
     assert status["recognition_profiles"]["accurate"]["model"] == "gemini-3.1-pro-preview"
+    assert status["recognition_profiles"]["default"] == "flash31"
 
 
 def test_ui_capture_blocks_same_frame_but_allows_consecutive_new_frames(tmp_path) -> None:
@@ -2322,6 +2335,8 @@ def test_multistation_defaults_and_html_controls(monkeypatch) -> None:
     assert args.gemini_fallback is False
     assert args.gemini_timeout == pytest.approx(10.0)
     assert args.gemini_model == "gemini-3.5-flash-lite"
+    assert args.gemini_31_model == "gemini-3.1-flash-lite"
+    assert args.gemini_31_timeout == pytest.approx(15.0)
     assert args.gemini_37_model == "gemini-3.7-flash"
     assert args.gemini_37_timeout == pytest.approx(30.0)
     assert args.gemini_accurate_model == "gemini-3.1-pro-preview"
@@ -2400,6 +2415,8 @@ def test_ui_does_not_offer_fake_gemini_profile_when_backend_is_local() -> None:
     assert 'id="recognitionProvider"' in TEST_UI_HTML
     assert 'id="recognitionHint"' in TEST_UI_HTML
     assert "function syncRecognitionSettings" in TEST_UI_HTML
+    assert "new Option('Mặc định · 3.1 Flash-Lite · Free','flash31')" in TEST_UI_HTML
+    assert "recognitionProfile.value='flash31'" in TEST_UI_HTML
     assert '<option value="gemini">Gemini API</option>' in TEST_UI_HTML
     assert '<option value="codex">Codex · ChatGPT</option>' in TEST_UI_HTML
     assert "$('recognitionProviderOption').hidden=!primary" in TEST_UI_HTML

@@ -221,7 +221,7 @@ const captureQr=$('captureQr'),weight=$('weight'),productWeight=$('productWeight
 const CAMERA_MAP_PREFIX='rollQrScale.cameraMap.v1:';
 const PANEL_CAMERA_MAP_PREFIX='rollQrScale.panelCameraMap.v1:';
 const IP_CAMERA_HOST_KEY='rollQrScale.ipCameraHost.v1';
-const RECOGNITION_PROFILE_KEY='rollQrScale.recognitionProfile.v1';
+const RECOGNITION_PROFILE_KEY='rollQrScale.recognitionProfile.v2';
 const RECOGNITION_PROVIDER_KEY='rollQrScale.recognitionProvider.v1';
 const SOURCE_CONTEXT_KEY='rollQrScale.sourceContext.v1';
 const ROLL_BATCH_CONFIRM_PREFIX='rollQrScale.rollBatchConfirm.v1:';
@@ -237,9 +237,10 @@ function wantsInventoryMode(){if(/\/kiem-kho\/?$/.test(location.pathname))return
  let panelMode=false,panelDrawing=false,panelDrawStart=null,panelScanBusy=false;
  const PANEL_REGION_PREFIX='rollQrScale.panelRegions.v1:';
 let sourceContext=loadSourceContext();
-try{const savedProfile=localStorage.getItem(RECOGNITION_PROFILE_KEY);if(['fast','flash37','accurate'].includes(savedProfile))recognitionProfile.value=savedProfile}catch{}
+const flash31ProfileOption=new Option('Mặc định · 3.1 Flash-Lite · Free','flash31');recognitionProfile.prepend(flash31ProfileOption);recognitionProfile.value='flash31';
+try{const savedProfile=localStorage.getItem(RECOGNITION_PROFILE_KEY);if(['flash31','fast','flash37','accurate'].includes(savedProfile))recognitionProfile.value=savedProfile}catch{}
 try{const savedProvider=localStorage.getItem(RECOGNITION_PROVIDER_KEY);if(['gemini','codex'].includes(savedProvider))recognitionProvider.value=savedProvider}catch{}
-function recognitionLabel(){const provider=recognitionProvider.value==='codex'?'Codex · ChatGPT':'Gemini';if(recognitionProvider.value!=='gemini')return provider;const labels={fast:'Nhanh · Flash-Lite',flash37:'Cân bằng · 3.7 Flash',accurate:'Chính xác · Pro'};return provider+' · '+(labels[recognitionProfile.value]||recognitionProfile.value)}
+function recognitionLabel(){const provider=recognitionProvider.value==='codex'?'Codex · ChatGPT':'Gemini';if(recognitionProvider.value!=='gemini')return provider;const labels={flash31:'Mặc định · 3.1 Flash-Lite',fast:'Nhanh · 3.5 Flash-Lite',flash37:'Cân bằng · 3.7 Flash',accurate:'Chính xác · Pro'};return provider+' · '+(labels[recognitionProfile.value]||recognitionProfile.value)}
 function syncRecognitionSettings(announce=false){const primary=Boolean(appStatus&&appStatus.weight_engine==='gemini'),codex=(appStatus&&appStatus.codex)||{},profiles=(appStatus&&appStatus.recognition_profiles)||{},codexOption=recognitionProvider.querySelector('option[value="codex"]'),hint=$('recognitionHint');if(codexOption)codexOption.disabled=!Boolean(codex.available);for(const option of recognitionProfile.options)option.disabled=!Boolean(profiles[option.value]&&profiles[option.value].enabled);if(recognitionProvider.value==='codex'&&!codex.available){recognitionProvider.value='gemini';try{localStorage.setItem(RECOGNITION_PROVIDER_KEY,'gemini')}catch{}}if(recognitionProfile.selectedOptions[0]?.disabled)recognitionProfile.value='fast';const usingGemini=recognitionProvider.value==='gemini';if($('recognitionProviderOption'))$('recognitionProviderOption').hidden=!primary;if($('recognitionProfileOption'))$('recognitionProfileOption').hidden=!primary||!usingGemini;if($('codexLoginBtn')){$('codexLoginBtn').hidden=!primary||(Boolean(codex.available)&&recognitionProvider.value!=='codex');$('codexLoginBtn').textContent=codex.available?'Đăng nhập lại Codex':'Đăng nhập Codex'}if(hint){if(!primary){hint.hidden=true;hint.textContent=''}else if(!codex.available){hint.hidden=false;hint.textContent=codex.message||'Codex chưa sẵn sàng trên máy này. Dùng Gemini (Flash-Lite/Pro) hoặc cài Codex CLI rồi đăng nhập.'}else{hint.hidden=usingGemini;hint.textContent=usingGemini?'':'Đang dùng Codex · ChatGPT (không dùng Flash-Lite/Pro).'}}if(announce)status(captureStatus,'Đã chọn AI: '+recognitionLabel(),'ok')}
 
 function todayLocalDate(){const now=new Date();return[now.getFullYear(),String(now.getMonth()+1).padStart(2,'0'),String(now.getDate()).padStart(2,'0')].join('-')}
