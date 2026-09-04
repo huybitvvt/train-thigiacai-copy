@@ -2082,11 +2082,12 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert '<meta name="theme-color" content="#0d0d0f">' in TEST_UI_HTML
     assert '@media(hover:none)' in TEST_UI_HTML
     assert 'id="captureQr" autocomplete="off" autofocus' not in TEST_UI_HTML
-    assert "function tuneCameraTrack(track)" in TEST_UI_HTML
-    assert "Always call getUserMedia before enumerateDevices" in TEST_UI_HTML
-    assert "cameraDevices.every(device=>!String(device.label||'').trim())" in TEST_UI_HTML
-    assert "if(cameraDevices.length===1)" in TEST_UI_HTML
-    assert "showVideo(session);try{await session.video.play()}" in TEST_UI_HTML
+    assert "function openPrimaryCamera()" in TEST_UI_HTML
+    assert "bindActionButton('openDefaultCamBtn',()=>openPrimaryCamera())" in TEST_UI_HTML
+    assert "function ensureStationsReady()" in TEST_UI_HTML
+    assert "function cameraErrorHint(error)" in TEST_UI_HTML
+    assert "Chưa thấy camera — bấm Làm mới / Mở camera" in TEST_UI_HTML
+    assert "{video:true,audio:false}" in TEST_UI_HTML
     assert "function decodeClientQr(canvas)" in TEST_UI_HTML
     assert "client_qr_code:clientQr" in TEST_UI_HTML
     assert "const evidenceImage=data.evidence_image||image" in TEST_UI_HTML
