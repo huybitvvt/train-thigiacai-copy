@@ -1625,6 +1625,25 @@ def test_local_production_items_show_unread_photos_as_one_visible_row(tmp_path) 
     assert product_id in str(items[0]["product_image_url"])
     assert "AI chưa đọc được số cân" in str(items[0]["sync_error"])
 
+    store = MeasurementStore(tmp_path / "measurements.db", tmp_path / "captures")
+    store.mark_photo_draft_synced(core_id, remote_id=1, remote_image_url="https://img/core.jpg")
+    store.mark_photo_draft_synced(
+        product_id,
+        remote_id=2,
+        remote_image_url="https://img/product.jpg",
+    )
+    synced_items = test_ui_module._local_production_items(
+        store,
+        100,
+        work_date="2026-09-04",
+        production_order="LSX-DH067",
+    )
+    store.close()
+
+    assert len(synced_items) == 1
+    assert synced_items[0]["sync_status"] == "synced"
+    assert "AI chưa đọc được số cân" in str(synced_items[0]["sync_error"])
+
 
 def test_shift_count_is_visible_and_refreshes_after_save_and_filter_changes() -> None:
     assert 'id="shiftCount"' in TEST_UI_HTML

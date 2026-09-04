@@ -1140,11 +1140,13 @@ def _photo_draft_display_items(
             "failed"
             if "failed" in states
             else "pending"
-            if states & {"pending", "local"}
+            if "pending" in states
+            else "local"
+            if "local" in states
             else "synced"
         )
         payload["storage_sync_status"] = storage_sync_status
-        payload["sync_status"] = "failed" if storage_sync_status == "failed" else "pending"
+        payload["sync_status"] = storage_sync_status
         details = ["AI chưa đọc được số cân"]
         details.extend(sorted(sync_errors.get(parent_id, set())))
         payload["sync_error"] = " · ".join(details)
