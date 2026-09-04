@@ -1268,6 +1268,55 @@ def _resolve_measurement_image_bytes(
     )
 
 
+def _decode_product_qr_for_reread(
+    service: object,
+    frame: np.ndarray,
+    client_qr: str = "",
+) -> dict[str, object]:
+    """Decode a saved product QR independently from weight AI/Gemini."""
+
+    client_qr = str(client_qr or "").strip()
+    if len(client_qr) > 512 or any(ord(character) < 32 for character in client_qr):
+        raise ValueError("Mã QR từ trình duyệt không hợp lệ")
+    decode = getattr(service, "_decode_qr")
+    decoded = decode(frame)
+    local_qr = (
+        str(decoded.get("qr_code") or "").strip()
+        if decoded.get("found")
+        else ""
+    )
+    if client_qr and local_qr and client_qr != local_qr:
+        return {
+            "qr_code": "",
+            "qr_found": False,
+            "qr_conflict": True,
+            "qr_decoder": "browser+backend-conflict",
+        }
+    if local_qr:
+        decoder = f"camera:{decoded.get('decoder', 'local')}"
+        if client_qr:
+            decoder += "+browser-confirmed"
+        return {
+            "qr_code": local_qr,
+            "qr_found": True,
+            "qr_conflict": False,
+            "qr_decoder": decoder,
+        }
+    if client_qr:
+        return {
+            "qr_code": client_qr,
+            "qr_found": True,
+            "qr_conflict": False,
+            "qr_decoder": "browser-barcode-detector",
+        }
+    return {
+        "qr_code": "",
+        "qr_found": False,
+        "qr_conflict": False,
+        "qr_decoder": "",
+    }
+
+
 def _persist_measurement_edit(
     store: MeasurementStore,
     *,
@@ -3886,21 +3935,16 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     core_url = item.get("core_image_url") or item.get("image_url")
                     product_url = item.get("product_image_url")
                     product_path = item.get("product_image_path")
-                    if (
-                        not product_url
-                        and isinstance(product_path, str)
-                        and product_path
-                        and supabase_url
-                        and publishable_key
-                    ):
-                        try:
-                            product_url = sign_storage_image(
-                                supabase_url,
-                                publishable_key,
-                                product_path,
-                            )
-                        except Exception:
-                            pass
+                    if not product_url and isinstance(product_path, str) and product_path:
+                        if supabase_url and publishable_key:
+                            try:
+                                product_url = sign_storage_image(
+                                    supabase_url,
+                                    publishable_key,
+                                    product_path,
+                                )
+                            except Exception:
+                                pass
                     metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
                     raw_weight = str(metadata.get("weight_raw", "") or item.get("weight_raw", ""))
                     product_weight_value = item.get("product_weight")
@@ -4279,60 +4323,56 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                     )
                     frame = decode_image_bytes(image_bytes)
                     client_qr = str(payload.get("client_qr_code") or "").strip()
-                    # Đọc SP: không gửi mã cũ để decoder lấy lại QR từ ảnh.
-                    # Đọc lõi: giữ mã hiện có, không đọc QR.
-                    analysis = service.analyze(
-                        frame,
-                        "auto",
-                        unit,
-                        recognition_profile=recognition_profile,
-                        recognition_provider=recognition_provider,
-                        capture_kind=kind,
-                        client_qr_code=client_qr if kind == "product" else previous_qr,
+                    qr_result = (
+                        _decode_product_qr_for_reread(service, frame, client_qr)
+                        if kind == "product"
+                        else {
+                            "qr_code": "",
+                            "qr_found": False,
+                            "qr_conflict": False,
+                            "qr_decoder": "",
+                        }
                     )
-                    if not analysis.get("weight_found"):
+                    # QR is decoded first and outside the AI queue, so a Gemini
+                    # quota/network failure cannot discard a reliable QR result.
+                    analysis: dict[str, object] = {}
+                    weight_error = ""
+                    try:
+                        analysis = service.analyze(
+                            frame,
+                            "auto",
+                            unit,
+                            recognition_profile=recognition_profile,
+                            recognition_provider=recognition_provider,
+                            capture_kind=kind,
+                            client_qr_code=("" if kind == "product" else previous_qr),
+                        )
+                    except Exception as exc:
+                        weight_error = str(exc)
+                    weight_found = bool(analysis.get("weight_found"))
+                    new_weight: float | None = None
+                    if weight_found:
+                        try:
+                            new_weight = float(analysis.get("weight"))
+                        except (TypeError, ValueError) as exc:
+                            raise ValueError("AI trả số cân không hợp lệ") from exc
+                        if not math.isfinite(new_weight) or new_weight < 0:
+                            raise ValueError("Số cân AI đọc được không hợp lệ")
+                    elif kind == "core" or not qr_result.get("qr_found"):
+                        detail = f": {weight_error}" if weight_error else ""
                         raise ValueError(
                             "AI không đọc được số cân từ ảnh "
                             + ("lõi" if kind == "core" else "SP")
+                            + detail
                         )
-                    try:
-                        new_weight = float(analysis.get("weight"))
-                    except (TypeError, ValueError) as exc:
-                        raise ValueError("AI trả số cân không hợp lệ") from exc
-                    if new_weight < 0:
-                        raise ValueError("Số cân AI đọc được không hợp lệ")
                     core_weight = previous_core
                     product_weight = previous_product
-                    read_qr = ""
-                    qr_found = False
-                    qr_conflict = False
-                    qr_decoder = ""
-                    # QR luôn theo decoder cân (local YOLO/zxing + browser), không lấy QR từ AI.
-                    if kind == "product":
-                        if len(client_qr) > 512 or any(
-                            ord(character) < 32 for character in client_qr
-                        ):
-                            raise ValueError("Mã QR từ trình duyệt không hợp lệ")
-                        decoded = service.decode_qr(frame)
-                        local_qr = (
-                            str(decoded.get("qr_code") or "").strip()
-                            if decoded.get("found")
-                            else ""
-                        )
-                        if client_qr and local_qr and client_qr != local_qr:
-                            qr_conflict = True
-                            qr_decoder = "browser+backend-conflict"
-                        elif local_qr:
-                            read_qr = local_qr
-                            qr_found = True
-                            qr_decoder = f"camera:{decoded.get('decoder', 'local')}"
-                            if client_qr:
-                                qr_decoder += "+browser-confirmed"
-                        elif client_qr:
-                            read_qr = client_qr
-                            qr_found = True
-                            qr_decoder = "browser-barcode-detector"
+                    read_qr = str(qr_result.get("qr_code") or "").strip()
+                    qr_found = bool(qr_result.get("qr_found"))
+                    qr_conflict = bool(qr_result.get("qr_conflict"))
+                    qr_decoder = str(qr_result.get("qr_decoder") or "")
                     if kind == "core":
+                        assert new_weight is not None
                         core_weight = new_weight
                         weight_raw = _upsert_raw_tag(
                             weight_raw, "HUMAN_CONFIRMED_CORE", f"{new_weight:g}"
@@ -4341,18 +4381,19 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                             weight_raw, "REREAD_CORE", f"{new_weight:g}"
                         )
                     else:
-                        product_weight = new_weight
-                        weight_raw = _upsert_raw_tag(
-                            weight_raw, "PRODUCT_WEIGHT", f"{new_weight:g}"
-                        )
-                        weight_raw = _upsert_raw_tag(
-                            weight_raw,
-                            "HUMAN_CONFIRMED_PRODUCT",
-                            f"{new_weight:g}",
-                        )
-                        weight_raw = _upsert_raw_tag(
-                            weight_raw, "REREAD_PRODUCT", f"{new_weight:g}"
-                        )
+                        if new_weight is not None:
+                            product_weight = new_weight
+                            weight_raw = _upsert_raw_tag(
+                                weight_raw, "PRODUCT_WEIGHT", f"{new_weight:g}"
+                            )
+                            weight_raw = _upsert_raw_tag(
+                                weight_raw,
+                                "HUMAN_CONFIRMED_PRODUCT",
+                                f"{new_weight:g}",
+                            )
+                            weight_raw = _upsert_raw_tag(
+                                weight_raw, "REREAD_PRODUCT", f"{new_weight:g}"
+                            )
                         if read_qr:
                             qr_code = read_qr
                             weight_raw = _upsert_raw_tag(
@@ -4418,7 +4459,8 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                             "qr_decoder": qr_decoder or None,
                             "product_code": product_code or None,
                             "image_source": image_source,
-                            "weight_found": True,
+                            "weight_found": weight_found,
+                            "weight_error": weight_error or None,
                             "quality_pass": bool(analysis.get("quality_pass")),
                             "recognition_source": analysis.get("recognition_source"),
                             "recognition_provider": analysis.get(

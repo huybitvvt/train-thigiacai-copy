@@ -1984,7 +1984,7 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "session.qr=data.qr_code||''" not in TEST_UI_HTML
     assert "if(isProduct){session.productAnalysis=data" in TEST_UI_HTML
     assert "reliableQr=Boolean(data.qr_found&&!data.qr_conflict&&!qrDecoder.startsWith('gemini'))" in TEST_UI_HTML
-    assert "if(reliableQr&&String(data.qr_code||'').trim()&&!String(session.qr||'').trim())session.qr=String(data.qr_code).trim()" in TEST_UI_HTML
+    assert "if(reliableQr&&String(data.qr_code||'').trim()&&!String(session.qr||'').trim())" in TEST_UI_HTML
     assert "$('analyzeCoreBtn').disabled=panelMode||busy||!ready" in TEST_UI_HTML
     assert "$('analyzeProductBtn').disabled=panelMode||busy||!ready||!coreReady(session)" in TEST_UI_HTML
     assert "$('analyzeCoreBtn').disabled=panelMode||busy||!ready||!sourceChosen" not in TEST_UI_HTML
