@@ -2015,6 +2015,10 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert 'id="listQrCode"' in TEST_UI_HTML
     assert 'id="listRecordsCard"' in TEST_UI_HTML
     assert "loadListRecords()" in TEST_UI_HTML
+    assert "function startAiCountdown(" in TEST_UI_HTML
+    assert "function stopAiCountdown(" in TEST_UI_HTML
+    assert "startAiCountdown(session.box," in TEST_UI_HTML
+    assert "stopAiCountdown()" in TEST_UI_HTML
     assert "function rereadListRecord(" in TEST_UI_HTML
     assert "'/api/measurements/reread'" in TEST_UI_HTML
     assert "reread-core" in TEST_UI_HTML
@@ -2079,7 +2083,10 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert '@media(hover:none)' in TEST_UI_HTML
     assert 'id="captureQr" autocomplete="off" autofocus' not in TEST_UI_HTML
     assert "function tuneCameraTrack(track)" in TEST_UI_HTML
-    assert "initialCameraPermissionCheck&&stations.some(session=>session.deviceId)" in TEST_UI_HTML
+    assert "Always call getUserMedia before enumerateDevices" in TEST_UI_HTML
+    assert "cameraDevices.every(device=>!String(device.label||'').trim())" in TEST_UI_HTML
+    assert "if(cameraDevices.length===1)" in TEST_UI_HTML
+    assert "showVideo(session);try{await session.video.play()}" in TEST_UI_HTML
     assert "function decodeClientQr(canvas)" in TEST_UI_HTML
     assert "client_qr_code:clientQr" in TEST_UI_HTML
     assert "const evidenceImage=data.evidence_image||image" in TEST_UI_HTML
