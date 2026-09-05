@@ -5,7 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from roll_qr_scale.lookup import _format_result, _lookup_from_image
+from roll_qr_scale.lookup import LOOKUP_HTML, _format_result, _lookup_from_image
 from roll_qr_scale.lookup_client import lookup_roll
 
 
@@ -86,6 +86,12 @@ def test_lookup_client_returns_not_found_payload() -> None:
 
     assert result == response
     assert _format_result(result) == "KHÔNG TÌM THẤY QR: MISSING-001"
+
+
+def test_lookup_html_uses_optimized_cloudinary_delivery_url() -> None:
+    assert "function cloudinaryDisplayUrl(" in LOOKUP_HTML
+    assert "c_limit,w_'+safeWidth+'/q_auto:good/f_auto/" in LOOKUP_HTML
+    assert "image.src=cloudinaryDisplayUrl(m.image_url,1280)" in LOOKUP_HTML
 
 
 def test_lookup_client_rejects_invalid_json() -> None:

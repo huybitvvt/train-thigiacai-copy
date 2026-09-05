@@ -2113,6 +2113,17 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert 'id="listQrCode"' in TEST_UI_HTML
     assert 'id="listRecordsCard"' in TEST_UI_HTML
     assert "loadListRecords()" in TEST_UI_HTML
+    assert "function cloudinaryDisplayUrl(" in TEST_UI_HTML
+    assert "c_limit,w_'+safeWidth+'/q_auto:" in TEST_UI_HTML
+    assert "image.src=cloudinaryDisplayUrl(url,240,'eco')" in TEST_UI_HTML
+    assert "img.src=cloudinaryDisplayUrl(url,1280,'good')" in TEST_UI_HTML
+    assert "link.href=url" in TEST_UI_HTML
+    assert "const LIST_PAGE_SIZE=50" in TEST_UI_HTML
+    assert 'id="listPrevPageBtn"' in TEST_UI_HTML
+    assert 'id="listNextPageBtn"' in TEST_UI_HTML
+    assert "listRecordsItems.slice(start,start+LIST_PAGE_SIZE)" in TEST_UI_HTML
+    assert "'/api/measurements?limit=50&'" in TEST_UI_HTML
+    assert "'/api/inventory-checks?limit=50'" in TEST_UI_HTML
     assert "function startAiCountdown(" in TEST_UI_HTML
     assert "function stopAiCountdown(" in TEST_UI_HTML
     assert "startAiCountdown(session.box," in TEST_UI_HTML

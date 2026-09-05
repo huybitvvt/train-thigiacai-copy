@@ -128,6 +128,8 @@ Schema tạo:
 
 Edge Function dùng secret key mặc định của môi trường Supabase (`SUPABASE_SECRET_KEYS`, có fallback cho project cũ dùng `SUPABASE_SERVICE_ROLE_KEY`) và ba secret Cloudinary. Gateway chỉ có `DEVICE_INGEST_TOKEN`; API secret Cloudinary và khóa bypass RLS không bao giờ đưa xuống trình duyệt/máy trạm.
 
+URL gốc Cloudinary vẫn được giữ nguyên trong Supabase để làm bằng chứng và đọc lại bằng AI. Giao diện chỉ tạo biến thể khi hiển thị: thumbnail giới hạn 240 px với `q_auto:eco/f_auto`, ảnh xem lớn giới hạn 1280 px với `q_auto:good/f_auto`; danh sách DB dựng tối đa 50 dòng ảnh mỗi trang để hạn chế bandwidth.
+
 ## 3. Cấu hình gateway
 
 Không commit token vào Git. Với bản source/developer, đặt biến môi trường trong PowerShell:

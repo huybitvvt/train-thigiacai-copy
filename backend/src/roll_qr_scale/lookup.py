@@ -79,6 +79,7 @@ button{font-size:18px;padding:10px 18px}.result{margin-top:22px;padding:18px;bor
 <div id="result" class="result">Đang chờ quét QR…</div></div>
 <script>
 const form=document.getElementById('form'), input=document.getElementById('qr'), result=document.getElementById('result');
+function cloudinaryDisplayUrl(url,width=1280){const value=String(url||'').trim(),marker='/image/upload/';if(!value.startsWith('https://res.cloudinary.com/')||!value.includes(marker))return value;const safeWidth=Math.max(1,Math.min(2000,Math.round(Number(width)||1280)));return value.replace(marker,marker+'c_limit,w_'+safeWidth+'/q_auto:good/f_auto/')}
 form.addEventListener('submit',async e=>{e.preventDefault();const qr=input.value.trim();if(!qr)return;
  result.textContent='Đang tra cứu…';
  try{const response=await fetch('/api/lookup?qr='+encodeURIComponent(qr));const data=await response.json();
@@ -87,7 +88,7 @@ form.addEventListener('submit',async e=>{e.preventDefault();const qr=input.value
    const title=document.createElement('div');title.textContent='QR: '+m.qr_code;result.appendChild(title);
    const w=document.createElement('div');w.className='weight';w.textContent='NET: '+m.net_weight+' '+m.unit;result.appendChild(w);
    const details=document.createElement('div');details.textContent='Gross: '+m.gross_weight+' '+m.unit+' | Tare: '+m.tare_weight+' '+m.unit+' | '+m.captured_at;result.appendChild(details);
-   if(m.image_url){const image=document.createElement('img');image.src=m.image_url;image.alt='Ảnh lần cân';result.appendChild(image);}
+   if(m.image_url){const image=document.createElement('img');image.loading='lazy';image.decoding='async';image.src=cloudinaryDisplayUrl(m.image_url,1280);image.alt='Ảnh lần cân';result.appendChild(image);}
   }}catch(error){result.innerHTML='<div class="error">Lỗi tra cứu: '+error.message+'</div>';}
  input.value='';input.focus();});
 </script></body></html>"""
