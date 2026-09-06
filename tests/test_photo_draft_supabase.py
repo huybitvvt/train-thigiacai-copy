@@ -39,6 +39,18 @@ def test_ingest_routes_photo_draft_before_measurement_validation() -> None:
     assert "/photo-draft/${parentEventId}/${captureKind}-${captureRound + 1}/${eventId}" in FUNCTION
 
 
+def test_measurement_list_is_filtered_counted_and_bandwidth_limited() -> None:
+    assert "const EVENT_LIST_SELECT" in FUNCTION
+    assert '.select(EVENT_LIST_SELECT, { count: "exact" })' in FUNCTION
+    assert 'params.get("work_date")' in FUNCTION
+    assert 'params.get("machine")' in FUNCTION
+    assert 'params.get("production_order")' in FUNCTION
+    assert 'query.eq("metadata->>work_date", workDate)' in FUNCTION
+    assert 'query.eq("metadata->>machine", machine)' in FUNCTION
+    assert 'query.eq("metadata->>production_order", productionOrder)' in FUNCTION
+    assert "total_count: count" in FUNCTION
+
+
 def test_photo_draft_is_linked_to_weigh_event_and_slot() -> None:
     lowered = PARENT_EVENT_MIGRATION.lower()
     assert "parent_event_id uuid" in lowered

@@ -41,7 +41,7 @@ from .codex_oauth_weight import CodexOAuthWeightReader
 from .capture_gate import frame_fingerprint
 from .api_client import (
     fetch_remote_json,
-    fetch_remote_measurements,
+    fetch_remote_measurement_page,
     fetch_supabase_photo_drafts,
     fetch_supabase_rows,
     fetch_supabase_table,
@@ -473,35 +473,45 @@ def _fetch_ingest_measurements_paged(
     api_token: str,
     *,
     limit: int,
+    offset: int = 0,
+    work_date: str = "",
     date_from: str = "",
     date_to: str = "",
     shift: str = "",
+    machine: str = "",
+    production_order: str = "",
     qr_code: str = "",
-) -> list[dict[str, object]]:
+) -> tuple[list[dict[str, object]], int | None]:
     """Pull cloud rows in pages until the requested window is filled."""
 
-    page_size = 200
     wanted = max(1, min(int(limit), 2000))
+    page_size = min(200, wanted)
     items: list[dict[str, object]] = []
-    offset = 0
+    next_offset = max(0, int(offset))
+    total_count: int | None = None
     for _ in range(25):
-        batch = fetch_remote_measurements(
+        batch, batch_total = fetch_remote_measurement_page(
             api_url,
             api_token,
             limit=page_size,
-            offset=offset,
+            offset=next_offset,
+            work_date=work_date,
             date_from=date_from,
             date_to=date_to,
             shift=shift,
+            machine=machine,
+            production_order=production_order,
             qr_code=qr_code,
         )
+        if total_count is None:
+            total_count = batch_total
         if not batch:
             break
         items.extend(batch)
         if len(batch) < page_size or len(items) >= wanted:
             break
-        offset += len(batch)
-    return items[:wanted]
+        next_offset += len(batch)
+    return items[:wanted], total_count
 
 
 def _looks_like_measurement_items(items: list[dict[str, object]]) -> bool:
@@ -4012,9 +4022,13 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
             if parsed.path == "/api/measurements":
                 query = urllib.parse.parse_qs(parsed.query)
                 try:
-                    limit = int(query.get("limit", ["50"])[0])
+                    limit = max(1, min(int(query.get("limit", ["50"])[0]), 200))
                 except ValueError:
                     limit = 50
+                try:
+                    offset = max(0, min(int(query.get("offset", ["0"])[0]), 50000))
+                except ValueError:
+                    offset = 0
                 work_date = str(query.get("work_date", [""])[0]).strip()
                 date_from = str(query.get("date_from", [""])[0]).strip()
                 date_to = str(query.get("date_to", [""])[0]).strip()
@@ -4040,6 +4054,7 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                 ingest_url = _ingest_api_url()
                 ingest_token = _ingest_api_token()
                 remote_items: list[dict[str, object]] | None = None
+                remote_total_count: int | None = None
                 remote_source = ""
                 fallback_error = ""
                 if supabase_url and publishable_key:
@@ -4047,20 +4062,26 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         remote_items = fetch_supabase_table(
                             supabase_url,
                             publishable_key,
-                            limit=max(limit, 200),
+                            limit=limit,
+                            offset=offset,
+                            **list_filters,
                         )
                         remote_source = "can_tu_dong"
                     except Exception as exc:
                         fallback_error = str(exc)
                 if remote_items is None and ingest_url and ingest_token:
                     try:
-                        remote_items = _fetch_ingest_measurements_paged(
+                        remote_items, remote_total_count = _fetch_ingest_measurements_paged(
                             ingest_url,
                             ingest_token,
-                            limit=max(limit, 500),
+                            limit=limit,
+                            offset=offset,
+                            work_date=work_date,
                             date_from=date_from,
                             date_to=date_to,
                             shift=shift,
+                            machine=machine,
+                            production_order=production_order,
                             qr_code=qr_code,
                         )
                         remote_source = "can_tu_dong:ingest"
@@ -4085,16 +4106,15 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                             "total_count": local_total_count,
                             "error_count": local_error_count,
                             "count_exact": True,
+                            "offset": offset,
+                            "limit": limit,
                             "items": _local_production_items(
-                                store,
-                                limit,
-                                **list_filters,
-                            ),
+                                store, offset + limit, **list_filters
+                            )[offset : offset + limit],
                         },
                     )
                     return
                 count_error = ""
-                remote_total_count: int | None = None
                 if supabase_url and publishable_key and remote_source == "can_tu_dong":
                     try:
                         remote_total_count = fetch_supabase_table_count(
@@ -4268,6 +4288,8 @@ def create_server(args: argparse.Namespace) -> tuple[ThreadingHTTPServer, Statio
                         "machine": machine,
                         "production_order": production_order,
                         "qr_code": qr_code,
+                        "offset": offset,
+                        "limit": limit,
                         "total_count": total_count,
                         "error_count": error_count,
                         "count_exact": count_exact,

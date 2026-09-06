@@ -1,9 +1,88 @@
 import urllib.parse
 
 from roll_qr_scale.api_client import (
+    fetch_remote_measurement_page,
     fetch_supabase_photo_draft_parent_ids,
+    fetch_supabase_table,
     fetch_supabase_table_count,
 )
+
+
+def test_remote_measurement_page_sends_all_filters_and_reads_exact_count(monkeypatch) -> None:
+    captured = {}
+
+    def fake_remote_json(url, token, *, params, timeout):
+        captured.update(url=url, token=token, params=params, timeout=timeout)
+        return {"ok": True, "total_count": 321, "items": [{"event_id": "event-1"}]}
+
+    monkeypatch.setattr("roll_qr_scale.api_client.fetch_remote_json", fake_remote_json)
+
+    items, total = fetch_remote_measurement_page(
+        "https://project.supabase.co/functions/v1/ingest-measurement",
+        "device-token",
+        limit=50,
+        offset=100,
+        work_date="2026-09-06",
+        shift="12C2",
+        machine="Máy Bao Bì",
+        production_order="LSX-DH067",
+        qr_code="SP-01",
+    )
+
+    assert items == [{"event_id": "event-1"}]
+    assert total == 321
+    assert captured["params"] == {
+        "limit": 50,
+        "offset": 100,
+        "work_date": "2026-09-06",
+        "shift": "12C2",
+        "machine": "Máy Bao Bì",
+        "production_order": "LSX-DH067",
+        "qr_code": "SP-01",
+    }
+
+
+def test_fetch_supabase_table_limits_columns_rows_and_filters(monkeypatch) -> None:
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b'[{"event_id":"event-1"}]'
+
+    def fake_urlopen(request, timeout):
+        captured["request"] = request
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    rows = fetch_supabase_table(
+        "https://project.supabase.co",
+        "public-key",
+        limit=50,
+        offset=100,
+        work_date="2026-09-06",
+        shift="12C2",
+        machine="Máy Bao Bì",
+        production_order="LSX-DH067",
+    )
+
+    query = urllib.parse.parse_qs(
+        urllib.parse.urlsplit(captured["request"].full_url).query
+    )
+    assert rows == [{"event_id": "event-1"}]
+    assert query["limit"] == ["50"]
+    assert query["offset"] == ["100"]
+    assert query["metadata->>work_date"] == ["eq.2026-09-06"]
+    assert query["metadata->>shift"] == ["eq.12C2"]
+    assert query["metadata->>machine"] == ["eq.Máy Bao Bì"]
+    assert query["metadata->>production_order"] == ["eq.LSX-DH067"]
+    assert "image_public_id" not in query["select"][0]
 
 
 def test_fetch_supabase_table_count_uses_all_source_filters(monkeypatch) -> None:

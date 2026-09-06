@@ -2121,7 +2121,8 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "const LIST_PAGE_SIZE=50" in TEST_UI_HTML
     assert 'id="listPrevPageBtn"' in TEST_UI_HTML
     assert 'id="listNextPageBtn"' in TEST_UI_HTML
-    assert "listRecordsItems.slice(start,start+LIST_PAGE_SIZE)" in TEST_UI_HTML
+    assert "offset='+offset+'&'+listQuery()" in TEST_UI_HTML
+    assert "await loadListRecords(false)" in TEST_UI_HTML
     assert "'/api/measurements?limit=50&'" in TEST_UI_HTML
     assert "'/api/inventory-checks?limit=50'" in TEST_UI_HTML
     assert "function startAiCountdown(" in TEST_UI_HTML
@@ -2207,7 +2208,7 @@ def test_product_capture_uses_detected_qr_as_product_code() -> None:
     assert "width:{ideal:1920}" in TEST_UI_HTML
     assert "height:{ideal:1080}" in TEST_UI_HTML
     assert "AI đọc toàn ảnh" in TEST_UI_HTML
-    assert "setInterval(()=>workflowMode==='inventory'?loadInventoryRecords():loadRecords(),15000)" in TEST_UI_HTML
+    assert "setInterval(()=>workflowMode==='inventory'?loadInventoryRecords():loadRecords(),15000)" not in TEST_UI_HTML
     assert "appStatus.release||'local'" in TEST_UI_HTML
     assert 'id="panelModeBtn"' in TEST_UI_HTML
     assert 'id="autoDetectPanelBtn"' in TEST_UI_HTML

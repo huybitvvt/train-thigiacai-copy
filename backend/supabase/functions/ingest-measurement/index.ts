@@ -19,6 +19,9 @@ const EVENT_SELECT =
   "core_image_public_id,product_image_path,product_image_url,product_image_public_id,qr_code,weight,tare_weight,net_weight,unit,captured_at," +
   "device_id,gateway_id,station_id,camera_id,analysis_id,frame_sha256,payload_hash," +
   "weight_source,qr_source,metadata";
+const EVENT_LIST_SELECT =
+  "id,event_id,image_url,core_image_url,product_image_url,product_image_path," +
+  "qr_code,weight,tare_weight,net_weight,unit,captured_at,metadata";
 
 function json(status: number, body: Record<string, unknown>): Response {
   return new Response(JSON.stringify(body), {
@@ -478,17 +481,22 @@ Deno.serve(async (request: Request) => {
       : 0;
     const dateFrom = (params.get("date_from") ?? "").trim();
     const dateTo = (params.get("date_to") ?? "").trim();
+    const workDate = (params.get("work_date") ?? "").trim();
     const shift = (params.get("shift") ?? "").trim();
+    const machine = (params.get("machine") ?? "").trim();
+    const productionOrder = (params.get("production_order") ?? "").trim();
     const qrCode = (params.get("qr_code") ?? "").trim();
     const supabase = createClient(supabaseUrl, serviceKey, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
     let query = supabase
       .from(MEASUREMENT_TABLE)
-      .select(EVENT_SELECT)
+      .select(EVENT_LIST_SELECT, { count: "exact" })
       .order("captured_at", { ascending: false })
       .range(offset, offset + limit - 1);
-    if (dateFrom) {
+    if (workDate) {
+      query = query.eq("metadata->>work_date", workDate);
+    } else if (dateFrom) {
       query = query.gte("metadata->>work_date", dateFrom);
     }
     if (dateTo) {
@@ -497,10 +505,16 @@ Deno.serve(async (request: Request) => {
     if (shift) {
       query = query.eq("metadata->>shift", shift);
     }
+    if (machine) {
+      query = query.eq("metadata->>machine", machine);
+    }
+    if (productionOrder) {
+      query = query.eq("metadata->>production_order", productionOrder);
+    }
     if (qrCode) {
       query = query.ilike("qr_code", `%${qrCode}%`);
     }
-    const { data, error } = await query;
+    const { data, error, count } = await query;
     if (error) {
       return json(500, { ok: false, error: "measurement_list_failed" });
     }
@@ -509,6 +523,8 @@ Deno.serve(async (request: Request) => {
       source: MEASUREMENT_TABLE,
       offset,
       limit,
+      total_count: count ?? (data ?? []).length,
+      count_exact: count !== null,
       items: data ?? [],
     });
   }

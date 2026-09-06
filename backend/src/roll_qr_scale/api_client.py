@@ -34,7 +34,7 @@ def fetch_remote_json(
     return parsed
 
 
-def fetch_remote_measurements(
+def fetch_remote_measurement_page(
     url: str,
     token: str,
     *,
@@ -43,9 +43,12 @@ def fetch_remote_measurements(
     date_from: str = "",
     date_to: str = "",
     shift: str = "",
+    machine: str = "",
+    production_order: str = "",
+    work_date: str = "",
     qr_code: str = "",
     timeout: float = 30.0,
-) -> list[dict[str, object]]:
+) -> tuple[list[dict[str, object]], int | None]:
     params: dict[str, object] = {
         "limit": max(1, min(limit, 1000)),
         "offset": max(0, int(offset)),
@@ -54,8 +57,14 @@ def fetch_remote_measurements(
         params["date_from"] = date_from
     if date_to:
         params["date_to"] = date_to
+    if work_date:
+        params["work_date"] = work_date
     if shift:
         params["shift"] = shift
+    if machine:
+        params["machine"] = machine
+    if production_order:
+        params["production_order"] = production_order
     if qr_code:
         params["qr_code"] = qr_code
     parsed = fetch_remote_json(url, token, params=params, timeout=timeout)
@@ -64,7 +73,22 @@ def fetch_remote_measurements(
     items = parsed.get("items")
     if not isinstance(items, list):
         raise RuntimeError("Supabase list response has no items")
-    return [item for item in items if isinstance(item, dict)]
+    total_value = parsed.get("total_count")
+    total_count = (
+        int(total_value)
+        if isinstance(total_value, (int, float)) and int(total_value) >= 0
+        else None
+    )
+    return [item for item in items if isinstance(item, dict)], total_count
+
+
+def fetch_remote_measurements(
+    url: str,
+    token: str,
+    **options: object,
+) -> list[dict[str, object]]:
+    items, _ = fetch_remote_measurement_page(url, token, **options)
+    return items
 
 
 def mutate_remote_measurement(
@@ -146,13 +170,51 @@ def fetch_supabase_table(
     publishable_key: str,
     *,
     limit: int = 50,
+    offset: int = 0,
+    work_date: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    shift: str = "",
+    machine: str = "",
+    production_order: str = "",
+    qr_code: str = "",
     timeout: float = 10.0,
 ) -> list[dict[str, object]]:
-    query = urllib.parse.urlencode({
-        "select": "*",
+    params: dict[str, object] = {
+        "select": (
+            "id,event_id,image_url,core_image_url,product_image_url,"
+            "product_image_path,qr_code,weight,tare_weight,net_weight,unit,"
+            "captured_at,metadata"
+        ),
         "order": "captured_at.desc",
         "limit": max(1, min(limit, 200)),
-    })
+        "offset": max(0, int(offset)),
+    }
+    if work_date:
+        params["metadata->>work_date"] = f"eq.{work_date}"
+    elif date_from and date_to:
+        params["and"] = (
+            f"(metadata->>work_date.gte.{date_from},"
+            f"metadata->>work_date.lte.{date_to})"
+        )
+    elif date_from:
+        params["metadata->>work_date"] = f"gte.{date_from}"
+    elif date_to:
+        params["metadata->>work_date"] = f"lte.{date_to}"
+    for field, value in (
+        ("shift", shift),
+        ("machine", machine),
+        ("production_order", production_order),
+    ):
+        selected = str(value or "").strip()
+        if selected:
+            params[f"metadata->>{field}"] = f"eq.{selected}"
+    selected_qr = str(qr_code or "").strip()
+    if selected_qr:
+        safe = selected_qr.replace("*", "").replace(",", "").replace(")", "")
+        if safe:
+            params["qr_code"] = f"ilike.*{safe}*"
+    query = urllib.parse.urlencode(params)
     request = urllib.request.Request(
         f"{supabase_url.rstrip('/')}/rest/v1/can_tu_dong?{query}",
         headers={
